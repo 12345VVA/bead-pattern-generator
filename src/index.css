@@ -1,0 +1,142 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --font-display: "VT323", monospace;
+  --font-body: "Space Mono", monospace;
+
+  --radius-sm: 0px;
+  --radius-md: 4px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+}
+
+:root {
+  /* Pixel Pop Art Palette */
+  --radius: 0rem; /* Hard edges for pixel feel */
+  
+  --background: oklch(0.99 0.01 85); /* Warm White #FFFDF5-ish */
+  --foreground: oklch(0.25 0.02 260); /* Dark Ink */
+  
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.25 0.02 260);
+  
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.25 0.02 260);
+  
+  /* Vibrant Teal */
+  --primary: oklch(0.72 0.16 180); 
+  --primary-foreground: oklch(0.25 0.02 260);
+  
+  /* Soft Yellow */
+  --secondary: oklch(0.92 0.12 95);
+  --secondary-foreground: oklch(0.35 0.05 50);
+  
+  /* Light Gray for Muted */
+  --muted: oklch(0.95 0.02 260);
+  --muted-foreground: oklch(0.55 0.05 260);
+  
+  /* Hot Pink for Accents */
+  --accent: oklch(0.7 0.2 340);
+  --accent-foreground: oklch(1 0 0);
+  
+  --destructive: oklch(0.6 0.2 20);
+  
+  --border: oklch(0.25 0.02 260); /* Thick dark borders */
+  --input: oklch(0.25 0.02 260);
+  --ring: oklch(0.72 0.16 180);
+}
+
+.dark {
+  /* Cyber Pixel Palette */
+  --background: oklch(0.15 0.05 260); /* Deep Blue-Black */
+  --foreground: oklch(0.95 0.05 180); /* Neon Cyan-ish White */
+  
+  --card: oklch(0.2 0.05 260);
+  --card-foreground: oklch(0.95 0.05 180);
+  
+  --popover: oklch(0.2 0.05 260);
+  --popover-foreground: oklch(0.95 0.05 180);
+  
+  --primary: oklch(0.7 0.16 180); /* Cyan */
+  --primary-foreground: oklch(0.1 0.05 260);
+  
+  --secondary: oklch(0.3 0.1 300); /* Purple */
+  --secondary-foreground: oklch(0.9 0.05 300);
+  
+  --muted: oklch(0.25 0.05 260);
+  --muted-foreground: oklch(0.7 0.05 260);
+  
+  --accent: oklch(0.6 0.2 330); /* Neon Pink */
+  --accent-foreground: oklch(1 0 0);
+  
+  --destructive: oklch(0.6 0.2 20);
+  
+  --border: oklch(0.4 0.1 260);
+  --input: oklch(0.4 0.1 260);
+  --ring: oklch(0.7 0.16 180);
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground font-body;
+  }
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-display uppercase tracking-wider;
+  }
+  
+  /* Retro Scrollbar */
+  ::-webkit-scrollbar {
+    width: 12px;
+    height: 12px;
+  }
+  ::-webkit-scrollbar-track {
+    @apply bg-muted;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-primary border-2 border-background;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-accent;
+  }
+}
+
+/* Custom Utilities for Pixel Theme */
+@utility shadow-pixel {
+  box-shadow: 4px 4px 0px 0px var(--color-border);
+}
+@utility shadow-pixel-sm {
+  box-shadow: 2px 2px 0px 0px var(--color-border);
+}
+@utility shadow-pixel-hover {
+  box-shadow: 6px 6px 0px 0px var(--color-border);
+  transform: translate(-2px, -2px);
+}
+@utility shadow-pixel-active {
+  box-shadow: 0px 0px 0px 0px var(--color-border);
+  transform: translate(4px, 4px);
+}

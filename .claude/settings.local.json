@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Bash(docker build -t bead-pattern-generator:latest .)",
+      "Bash(docker info)",
+      "Bash(findstr \"Docker Root Dir\")",
+      "Bash(if not exist \"%USERPROFILE%\\\\.docker\" mkdir \"%USERPROFILE%\\\\.docker\")",
+      "Bash(cmd /c \"if not exist %USERPROFILE%\\\\.docker mkdir %USERPROFILE%\\\\.docker\")",
+      "Bash(powershell -Command \"Get-Process | Where-Object {$_ProcessName -like ''*Docker*''} | Select-Object ProcessName, Id\")",
+      "Bash(findstr \"Registry\")",
+      "Bash(docker run -d -p 8080:80 --name bead-app bead-pattern-generator:latest)",
+      "Bash(pnpm build)",
+      "Bash(npm run build)"
+    ]
+  }
+}

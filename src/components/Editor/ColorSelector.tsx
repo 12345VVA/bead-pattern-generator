@@ -14,6 +14,8 @@ export interface ColorSelectorProps {
   isVisible: boolean;
   onClose: () => void;
   title?: string;
+  mode?: "floating" | "docked";
+  showHeader?: boolean;
 }
 
 // 颜色转 RGB
@@ -41,6 +43,8 @@ export function ColorSelector({
   isVisible,
   onClose,
   title = "色号选择器",
+  mode = "floating",
+  showHeader = true,
 }: ColorSelectorProps) {
   const [searchQuery, setSearchQuery] = useState("");
 
@@ -53,26 +57,36 @@ export function ColorSelector({
   );
 
   return (
-    <div className="absolute top-16 left-4 w-80 bg-white border-4 border-black shadow-2xl z-20">
-      <div className="flex items-center justify-between p-3 border-b-2 border-black bg-muted">
-        <div className="flex items-center gap-2">
-          <Palette className="w-4 h-4" />
-          <span className="font-bold text-sm">{title}</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <div className="text-xs text-muted-foreground">
-            {colors.length} 色
+    <div className={cn(
+      "bg-white",
+      mode === "floating" && "absolute top-16 left-4 w-80 shadow-2xl z-20",
+      mode === "floating" && "border-4 border-black",
+      mode === "docked" && "h-full w-full shadow-none border-0"
+    )}>
+      {showHeader && (
+        <div className={cn(
+          "flex items-center justify-between p-3 bg-muted",
+          mode === "floating" ? "border-b-2 border-black" : "border-b border-black/10"
+        )}>
+          <div className="flex items-center gap-2">
+            <Palette className="w-4 h-4" />
+            <span className="font-bold text-sm">{title}</span>
           </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={onClose}
-            className="h-7 w-7 p-0"
-          >
-            <X className="w-4 h-4" />
-          </Button>
+          <div className="flex items-center gap-2">
+            <div className="text-xs text-muted-foreground">
+              {colors.length} 色
+            </div>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={onClose}
+              className="h-7 w-7 p-0"
+            >
+              <X className="w-4 h-4" />
+            </Button>
+          </div>
         </div>
-      </div>
+      )}
 
       <div className="p-3 space-y-3">
         {/* 搜索框 */}
@@ -84,7 +98,10 @@ export function ColorSelector({
         />
 
         {/* 色号网格 */}
-        <ScrollArea className="h-64 border-2 border-black rounded">
+        <ScrollArea className={cn(
+          "rounded",
+          mode === "floating" ? "h-64 border-2 border-black" : "h-[22rem] border border-black/10 bg-muted/20"
+        )}>
           <div className="p-2 grid grid-cols-6 gap-1">
             {filteredColors.map((color) => {
               const textColor = getTextColor(color.hex);

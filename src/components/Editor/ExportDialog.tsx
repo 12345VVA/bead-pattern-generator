@@ -17,6 +17,8 @@ import type { ProcessedResult } from "@/lib/image-processing";
 import type { BeadColor } from "@/lib/colors";
 import { generatePDF } from "@/lib/pdf-generator";
 import { PixelButton } from "@/components/PixelUI";
+import { createProcessedPatternExportCanvas, downloadCanvasAsPng } from "@/lib/pattern-export";
+import { getProcessedPatternStats } from "@/lib/pattern-stats";
 
 interface ExportDialogProps {
   processedData: ProcessedResult | null;
@@ -39,12 +41,7 @@ export function ExportDialog({
 }: ExportDialogProps) {
   if (!processedData) return null;
 
-  const usedColors = Array.from(processedData.colorCounts.entries())
-    .map(([id, count]) => {
-      const color = palette.find(c => c.id === id);
-      return { ...color!, count };
-    })
-    .sort((a, b) => b.count - a.count);
+  const usedColors = getProcessedPatternStats(processedData, palette, width * height);
 
   const totalBeads = usedColors.reduce((acc, curr) => acc + curr.count, 0);
   const [showLabels, setShowLabels] = React.useState(true);
@@ -55,99 +52,16 @@ export function ExportDialog({
   };
 
   const handleDownloadImage = () => {
-    const canvas = document.createElement("canvas");
-    const pixelSize = 40; // High resolution export
-    const displayWidth = width * pixelSize;
-    const displayHeight = height * pixelSize;
-    canvas.width = displayWidth;
-    canvas.height = displayHeight;
-    const ctx = canvas.getContext("2d");
-    
-    if (!ctx) return;
-
-    // Draw Background
-    ctx.fillStyle = "#ffffff";
-    ctx.fillRect(0, 0, displayWidth, displayHeight);
-
-    // Draw Pixels
-    const pixels = processedData.pixels;
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        const i = (y * width + x) * 4;
-        const r = pixels[i];
-        const g = pixels[i + 1];
-        const b = pixels[i + 2];
-        const a = pixels[i + 3];
-
-        if (a < 10) continue;
-
-        ctx.fillStyle = `rgb(${r},${g},${b})`;
-        ctx.fillRect(x * pixelSize, y * pixelSize, pixelSize, pixelSize);
-
-        // Draw Labels
-        if (showImageLabels && processedData.beadGrid) {
-           const beadId = processedData.beadGrid[y * width + x];
-           if (beadId) {
-             // Check Hide White Labels
-             if (hideWhiteLabels) {
-               const color = palette.find(c => c.id === beadId);
-               if (color && (
-                 color.name.toLowerCase() === "white" ||
-                 color.name === "白色" ||
-                 color.name === "极浅灰" ||
-                 color.hex.toLowerCase() === "#ffffff" ||
-                 color.hex.toLowerCase() === "#fbfbfb" ||
-                 color.id === "H02" // MARD 极浅灰（作为白色使用）
-               )) {
-                 continue;
-               }
-             }
-
-             const brightness = (r * 299 + g * 587 + b * 114) / 1000;
-             ctx.fillStyle = brightness > 128 ? "#000000" : "#FFFFFF";
-             ctx.font = `bold ${pixelSize * 0.35}px sans-serif`;
-             ctx.textAlign = "center";
-             ctx.textBaseline = "middle";
-             ctx.fillText(beadId, x * pixelSize + pixelSize / 2, y * pixelSize + pixelSize / 2);
-           }
-        }
-      }
-    }
-
-    // Draw Grid (High Res)
-    ctx.lineWidth = 1;
-    ctx.strokeStyle = "rgba(0,0,0,0.15)";
-    ctx.beginPath();
-    for (let x = 0; x <= width; x++) {
-       if (x % 5 === 0) continue;
-       ctx.moveTo(x * pixelSize, 0);
-       ctx.lineTo(x * pixelSize, displayHeight);
-    }
-    for (let y = 0; y <= height; y++) {
-       if (y % 5 === 0) continue;
-       ctx.moveTo(0, y * pixelSize);
-       ctx.lineTo(displayWidth, y * pixelSize);
-    }
-    ctx.stroke();
-
-    // 5x5 Grid
-    ctx.lineWidth = 3;
-    ctx.strokeStyle = "rgba(0,0,0,0.6)";
-    ctx.beginPath();
-    for (let x = 0; x <= width; x+=5) {
-       ctx.moveTo(x * pixelSize, 0);
-       ctx.lineTo(x * pixelSize, displayHeight);
-    }
-    for (let y = 0; y <= height; y+=5) {
-       ctx.moveTo(0, y * pixelSize);
-       ctx.lineTo(displayWidth, y * pixelSize);
-    }
-    ctx.stroke();
-
-    const link = document.createElement("a");
-    link.download = "bead-pattern.png";
-    link.href = canvas.toDataURL("image/png");
-    link.click();
+    const canvas = createProcessedPatternExportCanvas(
+      processedData,
+      palette,
+      width,
+      height,
+      40,
+      showImageLabels,
+      hideWhiteLabels
+    );
+    downloadCanvasAsPng(canvas, "bead-pattern.png");
   };
 
   return (
@@ -178,17 +92,17 @@ export function ExportDialog({
                 </tr>
               </thead>
               <tbody>
-                {usedColors.map((color) => (
-                  <tr key={color.id} className="border-b border-black/5">
-                    <td className="py-2 font-mono">{color.id}</td>
+                {usedColors.map((stat) => (
+                  <tr key={stat.colorId} className="border-b border-black/5">
+                    <td className="py-2 font-mono">{stat.colorId}</td>
                     <td className="py-2">
                       <div 
                         className="w-6 h-6 border-2 border-black rounded-full shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]"
-                        style={{ backgroundColor: color.hex }}
+                        style={{ backgroundColor: stat.color.hex }}
                       />
                     </td>
-                    <td className="py-2">{color.name}</td>
-                    <td className="py-2 text-right font-mono font-bold">{color.count}</td>
+                    <td className="py-2">{stat.color.name}</td>
+                    <td className="py-2 text-right font-mono font-bold">{stat.count}</td>
                   </tr>
                 ))}
               </tbody>

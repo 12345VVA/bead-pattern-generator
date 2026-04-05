@@ -9,7 +9,8 @@ import {
     Pipette,
     Undo,
     X,
-    Palette
+    Palette,
+    Eye
 } from 'lucide-react';
 import type { BeadColor } from '@/lib/colors';
 import type { BeadRegion } from './types';
@@ -24,6 +25,7 @@ interface ToolbarProps {
     historyIndex: number;
     showColorStats: boolean;
     colorStatsCount: number;
+    showRecognitionPreview?: boolean;
 
     onZoomIn: () => void;
     onZoomOut: () => void;
@@ -36,6 +38,7 @@ interface ToolbarProps {
     onClearSelection: () => void;
     onToggleColorSelector: () => void;
     onToggleColorStats: () => void;
+    onToggleRecognitionPreview?: () => void;
 }
 
 export function Toolbar({
@@ -48,6 +51,7 @@ export function Toolbar({
     historyIndex,
     showColorStats,
     colorStatsCount,
+    showRecognitionPreview = false,
     onZoomIn,
     onZoomOut,
     onResetZoom,
@@ -59,6 +63,7 @@ export function Toolbar({
     onClearSelection,
     onToggleColorSelector,
     onToggleColorStats,
+    onToggleRecognitionPreview,
 }: ToolbarProps) {
     return (
         <div className="h-14 border-b-4 border-black bg-white flex items-center justify-between px-4 flex-shrink-0">
@@ -202,6 +207,18 @@ export function Toolbar({
                         <span className="ml-1 bg-black text-white text-xs px-1.5 rounded">
                             {colorStatsCount}
                         </span>
+                    </Button>
+                )}
+
+                {onToggleRecognitionPreview && (
+                    <Button
+                        variant={showRecognitionPreview ? "default" : "outline"}
+                        size="sm"
+                        onClick={onToggleRecognitionPreview}
+                        className="border-2 border-black"
+                    >
+                        <Eye className="w-4 h-4 mr-1" />
+                        预览
                     </Button>
                 )}
             </div>

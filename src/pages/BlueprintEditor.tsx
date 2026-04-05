@@ -2,38 +2,37 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useDropzone } from "react-dropzone";
 import {
   Upload, Image as ImageIcon, Download, FlipVertical, FlipHorizontal,
-  ZoomIn, ZoomOut, RotateCw, Palette, FileImage, X,
+  ZoomIn, ZoomOut, RotateCw, Palette, FileImage,
   Eye, EyeOff, Loader2, Pipette, Undo, Edit3, Plus
 } from "lucide-react";
-import { cn } from "@/lib/utils";
 import { PixelButton, PixelCard } from "@/components/PixelUI";
-import { Header, Footer } from "@/components/Layout";
-import { Link } from "wouter";
+import { Header } from "@/components/Layout";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Input } from "@/components/ui/input";
 import { Slider } from "@/components/ui/slider";
 import { PALETTES, type PaletteKey } from "@/lib/colors";
 import type { BeadColor } from "@/lib/colors";
 import { ImageCropper } from "@/components/Editor/ImageCropper";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { ColorSelector } from "@/components/Editor/ColorSelector";
+import { ColorStatsPanel } from "@/components/Editor/ColorStatsPanel";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import {
-  processBlueprint as processBlueprintEnhanced,
-  type BeadRegion as EnhancedBeadRegion,
-  type BoundaryDetectionConfig,
-  type ColorRecognitionConfig
-} from "@/lib/blueprint-processing";
 import type { ColorMatchAlgorithm } from "@/lib/image-processing";
 import { hexToRgb } from "@/lib/canvas-utils";
-import { findNearestColor } from "@/lib/image-processing";
 import { Sidebar } from "@/components/BlueprintEditor/Sidebar";
 import { Toolbar } from "@/components/BlueprintEditor/Toolbar";
 import type { BeadRegion } from "@/components/BlueprintEditor/types";
+import { useBlueprintRecognition } from "@/hooks/useBlueprintRecognition";
+import { useUndoHistory } from "@/hooks/useUndoHistory";
+import { createBlueprintExportCanvas, downloadCanvasAsPng } from "@/lib/pattern-export";
+import { getBlueprintPatternStats } from "@/lib/pattern-stats";
+import { WorkbenchSidebar } from "@/components/Workbench/WorkbenchSidebar";
+import { WorkbenchStatusBar } from "@/components/Workbench/WorkbenchStatusBar";
+import { WorkbenchRightDock } from "@/components/Workbench/WorkbenchRightDock";
+import { WorkbenchDockSection } from "@/components/Workbench/WorkbenchDockSection";
 
 
 
@@ -54,7 +53,6 @@ interface BlueprintEditorState {
   hideBlackLabels: boolean;
   hiddenColorIds: Set<string>;
   showColorStats: boolean;
-  isProcessing: boolean;
   canvasScale: number;
   canvasTranslateX: number;
   canvasTranslateY: number;
@@ -69,17 +67,15 @@ interface BlueprintEditorState {
   // 杂色过滤
   filterNoise: boolean;
   noiseThreshold: number;
+  // 颜色合并
+  mergeColors: boolean;
+  mergeTolerance: number;
   // 增强的边界检测配置
   boundaryDetectionMethod: 'grid' | 'contour' | 'adaptive';
   // 增强的颜色识别配置
   colorSampleMethod: 'average' | 'median' | 'dominant';
   excludeEdgePixels: boolean;
   colorMatchAlgorithm: ColorMatchAlgorithm;
-}
-
-// 历史记录类型
-interface HistoryEntry {
-  beadRegions: BeadRegion[];
 }
 
 export default function BlueprintEditor() {
@@ -93,14 +89,23 @@ export default function BlueprintEditor() {
   // 批量绘制状态
   const [isPainting, setIsPainting] = useState(false);
   const [paintedBeads, setPaintedBeads] = useState<Set<string>>(new Set());
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [isRightDockCollapsed, setIsRightDockCollapsed] = useState(false);
+  const [showRecognitionPreview, setShowRecognitionPreview] = useState(true);
+  const [isPreviewSectionCollapsed, setIsPreviewSectionCollapsed] = useState(false);
+  const [isStatsSectionCollapsed, setIsStatsSectionCollapsed] = useState(false);
+  const [isColorSelectorSectionCollapsed, setIsColorSelectorSectionCollapsed] = useState(false);
 
-  // 历史记录
-  const [history, setHistory] = useState<HistoryEntry[]>([]);
-  const [historyIndex, setHistoryIndex] = useState(-1);
-
-  // 色号搜索
-  const [colorSearchQuery, setColorSearchQuery] = useState("");
-
+  const {
+    history,
+    historyIndex,
+    canUndo,
+    reset: resetHistory,
+    push: pushHistory,
+    undo: undoHistory,
+  } = useUndoHistory<BeadRegion[]>({
+    clone: (regions) => JSON.parse(JSON.stringify(regions)),
+  });
   // 导出对话框
   const [showExportDialog, setShowExportDialog] = useState(false);
   const [exportFormat, setExportFormat] = useState<'png' | 'pdf'>('png');
@@ -124,7 +129,6 @@ export default function BlueprintEditor() {
     hideBlackLabels: false,
     hiddenColorIds: new Set<string>(),
     showColorStats: false,
-    isProcessing: false,
     canvasScale: 1,
     canvasTranslateX: 0,
     canvasTranslateY: 0,
@@ -137,12 +141,35 @@ export default function BlueprintEditor() {
     showColorSelector: true,
     filterNoise: false,
     noiseThreshold: 5,
+    // 颜色合并
+    mergeColors: false,
+    mergeTolerance: 30,
     // 增强的边界检测配置
     boundaryDetectionMethod: 'adaptive',
     // 增强的颜色识别配置
     colorSampleMethod: 'median',
     excludeEdgePixels: true,
     colorMatchAlgorithm: 'weighted',
+  });
+
+  const {
+    isProcessing,
+    rawBeadRegions,
+    setRawBeadRegions,
+    recognitionDebug,
+    setRecognitionDebug,
+    applyPostProcessingToRegions,
+    processBlueprint,
+  } = useBlueprintRecognition({
+    selectedPalette: state.selectedPalette,
+    boundaryDetectionMethod: state.boundaryDetectionMethod,
+    colorSampleMethod: state.colorSampleMethod,
+    excludeEdgePixels: state.excludeEdgePixels,
+    colorMatchAlgorithm: state.colorMatchAlgorithm,
+    filterNoise: state.filterNoise,
+    noiseThreshold: state.noiseThreshold,
+    mergeColors: state.mergeColors,
+    mergeTolerance: state.mergeTolerance,
   });
 
   const currentPalette = PALETTES[state.selectedPalette]?.colors || [];
@@ -173,7 +200,7 @@ export default function BlueprintEditor() {
       showCropper: false,
     }));
     // 处理图纸
-    processBlueprint(croppedImage);
+    runBlueprintRecognition(croppedImage);
     toast.success("图片处理成功！");
   };
 
@@ -197,8 +224,8 @@ export default function BlueprintEditor() {
     }
 
     // 保存初始状态到历史记录
-    setHistory([{ beadRegions: JSON.parse(JSON.stringify(newBeadRegions)) }]);
-    setHistoryIndex(0);
+    resetHistory(newBeadRegions);
+    setRawBeadRegions(JSON.parse(JSON.stringify(newBeadRegions)));
 
     setState(prev => ({
       ...prev,
@@ -210,122 +237,58 @@ export default function BlueprintEditor() {
       gridHeight: height,
       isEditMode: true, // 自动进入编辑模式
     }));
+    setRecognitionDebug(null);
 
     setShowNewGridDialog(false);
     toast.success(`已创建 ${width} x ${height} 的空白图纸`);
   };
 
-  // 杂色过滤函数
-  const applyNoiseFilter = (beadRegions: BeadRegion[], threshold: number) => {
-    // 统计颜色使用次数
-    const colorCounts = new Map<string, number>();
-    beadRegions.forEach(region => {
-      if (region.matchedColor) {
-        colorCounts.set(region.matchedColor.id, (colorCounts.get(region.matchedColor.id) || 0) + 1);
-      }
+  const applyWorkflowPostProcessing = useCallback((
+    sourceRegions: BeadRegion[],
+    options?: {
+      paletteKey?: PaletteKey;
+      algorithm?: ColorMatchAlgorithm;
+      resetHistory?: boolean;
+    }
+  ) => {
+    const result = applyPostProcessingToRegions(sourceRegions, {
+      paletteKey: options?.paletteKey,
+      algorithm: options?.algorithm,
     });
+    const cloned = JSON.parse(JSON.stringify(result.processed));
 
-    // 找出有效颜色（使用数量 >= 阈值）
-    const validColors = new Set<string>();
-    const colorReplacementMap = new Map<string, string>(); // 噪声颜色 -> 替换颜色
-
-    const sortedColors = Array.from(colorCounts.entries())
-      .sort(([, a], [, b]) => b - a);
-
-    for (const [colorId, count] of sortedColors) {
-      if (count >= threshold) {
-        validColors.add(colorId);
-      } else {
-        // 找到最接近的有效颜色作为替换
-        const noiseColor = currentPalette.find(c => c.id === colorId);
-        if (!noiseColor) continue;
-
-        const noiseRgb = hexToRgb(noiseColor.hex);
-        let minDist = Infinity;
-        let replacementColor = '';
-
-        for (const validId of validColors) {
-          const validColor = currentPalette.find(c => c.id === validId);
-          if (!validColor) continue;
-
-          const validRgb = hexToRgb(validColor.hex);
-          const dist = Math.sqrt(
-            Math.pow(noiseRgb.r - validRgb.r, 2) +
-            Math.pow(noiseRgb.g - validRgb.g, 2) +
-            Math.pow(noiseRgb.b - validRgb.b, 2)
-          );
-
-          if (dist < minDist) {
-            minDist = dist;
-            replacementColor = validId;
-          }
-        }
-
-        if (replacementColor) {
-          colorReplacementMap.set(colorId, replacementColor);
-        } else if (validColors.size > 0) {
-          // 如果没有找到，使用使用最多的颜色
-          const mostUsedId = sortedColors[0]?.[0];
-          if (mostUsedId) {
-            colorReplacementMap.set(colorId, mostUsedId);
-          }
-        }
-      }
+    if (options?.resetHistory) {
+      resetHistory(cloned);
     }
 
-    // 应用替换
-    const newBeadRegions = beadRegions.map(region => {
-      if (region.matchedColor) {
-        const newColorId = colorReplacementMap.get(region.matchedColor.id);
-        if (newColorId) {
-          const newColor = currentPalette.find(c => c.id === newColorId);
-          return {
-            ...region,
-            matchedColor: newColor || region.matchedColor
-          };
-        }
-      }
-      return region;
-    });
+    setState(prev => ({
+      ...prev,
+      beadRegions: result.processed,
+      gridWidth: result.gridWidth,
+      gridHeight: result.gridHeight,
+    }));
 
-    return newBeadRegions;
-  };
-
-  // 保存到历史记录
-  const saveToHistory = useCallback((beadRegions: BeadRegion[]) => {
-    setHistory(prev => {
-      const newHistory = prev.slice(0, historyIndex + 1);
-      newHistory.push({ beadRegions: JSON.parse(JSON.stringify(beadRegions)) });
-      // 限制历史记录数量
-      if (newHistory.length > 50) {
-        newHistory.shift();
-      }
-      return newHistory;
-    });
-    setHistoryIndex(prev => Math.min(prev + 1, 49));
-  }, [historyIndex]);
+    return result.processed;
+  }, [applyPostProcessingToRegions]);
 
   // 撤回
   const undo = useCallback(() => {
-    if (historyIndex > 0) {
-      const prevEntry = history[historyIndex - 1];
-      if (prevEntry) {
-        setState(prev => ({
-          ...prev,
-          beadRegions: JSON.parse(JSON.stringify(prevEntry.beadRegions)),
-        }));
-        setHistoryIndex(historyIndex - 1);
-        toast.success("已撤回");
-      }
+    const previousRegions = undoHistory();
+    if (previousRegions) {
+      setState(prev => ({
+        ...prev,
+        beadRegions: previousRegions,
+      }));
+      toast.success("已撤回");
     }
-  }, [history, historyIndex]);
+  }, [undoHistory]);
 
   // 键盘事件监听（Ctrl+Z 撤回）
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
         e.preventDefault();
-        if (historyIndex > 0) {
+        if (canUndo) {
           undo();
         }
       }
@@ -333,7 +296,7 @@ export default function BlueprintEditor() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [historyIndex, undo]);
+  }, [canUndo, undo]);
 
   // 选择颜色
   const selectColor = (color: BeadColor) => {
@@ -433,7 +396,7 @@ export default function BlueprintEditor() {
         setIsPainting(true);
         setPaintedBeads(new Set());
         // 保存当前状态到历史记录（在开始绘制时保存一次）
-        saveToHistory(state.beadRegions);
+        pushHistory(state.beadRegions);
       }
 
       paintBead(gridX, gridY);
@@ -470,75 +433,32 @@ export default function BlueprintEditor() {
   } as any);
 
   // 处理图纸 - 识别豆子边界和颜色（增强版）
-  const processBlueprint = (img: HTMLImageElement) => {
-    setState(prev => ({ ...prev, isProcessing: true }));
+  const runBlueprintRecognition = useCallback(async (img: HTMLImageElement) => {
+    try {
+      const result = await processBlueprint(img);
 
-    setTimeout(() => {
-      try {
-        const canvas = document.createElement('canvas');
-        canvas.width = img.width;
-        canvas.height = img.height;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) throw new Error('无法获取 canvas 上下文');
+      console.log(`检测质量: ${(result.detectionQuality * 100).toFixed(1)}%`);
+      console.log(`估算豆子尺寸: ${result.recognitionDebug.estimatedBeadSize}px`);
 
-        ctx.drawImage(img, 0, 0);
-        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const finalRegions = applyWorkflowPostProcessing(result.rawRegions, { resetHistory: true });
 
-        // 配置边界检测
-        const boundaryConfig: BoundaryDetectionConfig = {
-          method: state.boundaryDetectionMethod,
-          minBeadSize: 5,
-          maxBeadSize: 100,
-          edgeThreshold: 50,
-        };
+      setState(prev => ({
+        ...prev,
+        processedCanvas: result.processedCanvas,
+        beadRegions: finalRegions,
+        gridWidth: result.gridWidth,
+        gridHeight: result.gridHeight,
+      }));
+      setRecognitionDebug(result.recognitionDebug);
 
-        // 配置颜色识别
-        const colorConfig: ColorRecognitionConfig = {
-          sampleMethod: state.colorSampleMethod,
-          excludeEdgePixels: state.excludeEdgePixels,
-          edgeExclusionRatio: 0.2,
-          colorMatchConfig: {
-            algorithm: state.colorMatchAlgorithm,
-            useCache: true,
-          },
-        };
-
-        // 使用增强的处理函数
-        const palette = PALETTES[state.selectedPalette]?.colors || [];
-        const result = processBlueprintEnhanced(imageData, palette, boundaryConfig, colorConfig);
-
-        console.log(`检测质量: ${(result.detectionQuality * 100).toFixed(1)}%`);
-        console.log(`估算豆子尺寸: ${result.estimatedBeadSize}px`);
-
-        // 应用杂色过滤
-        let finalRegions = result.regions;
-        if (state.filterNoise) {
-          finalRegions = applyNoiseFilter(finalRegions, state.noiseThreshold);
-        }
-
-        // 保存初始状态到历史记录
-        setHistory([{ beadRegions: JSON.parse(JSON.stringify(finalRegions)) }]);
-        setHistoryIndex(0);
-
-        setState(prev => ({
-          ...prev,
-          processedCanvas: canvas,
-          beadRegions: finalRegions,
-          gridWidth: result.gridWidth,
-          gridHeight: result.gridHeight,
-          isProcessing: false,
-        }));
-
-        const qualityText = result.detectionQuality > 0.7 ? '优秀' :
-          result.detectionQuality > 0.5 ? '良好' : '一般';
-        toast.success(`识别完成！检测到 ${finalRegions.length} 个豆子，质量: ${qualityText}`);
-      } catch (error) {
-        console.error('处理图纸失败:', error);
-        toast.error('处理图纸失败，请检查图片格式');
-        setState(prev => ({ ...prev, isProcessing: false }));
-      }
-    }, 100);
-  };
+      const qualityText = result.detectionQuality > 0.7 ? '优秀' :
+        result.detectionQuality > 0.5 ? '良好' : '一般';
+      toast.success(`识别完成！检测到 ${finalRegions.length} 个豆子，质量: ${qualityText}`);
+    } catch (error) {
+      console.error('处理图纸失败:', error);
+      toast.error('处理图纸失败，请检查图片格式');
+    }
+  }, [applyWorkflowPostProcessing, processBlueprint, setRecognitionDebug]);
 
   // ============ 画布交互功能 ============
 
@@ -675,15 +595,7 @@ export default function BlueprintEditor() {
   };
 
   // 获取色号统计
-  const getColorStats = () => {
-    const stats = new Map<string, number>();
-    state.beadRegions.forEach(region => {
-      if (region.matchedColor) {
-        stats.set(region.matchedColor.id, (stats.get(region.matchedColor.id) || 0) + 1);
-      }
-    });
-    return Array.from(stats.entries()).sort((a, b) => b[1] - a[1]);
-  };
+  const getColorStats = () => getBlueprintPatternStats(state.beadRegions);
 
   // 导出处理
   const handleExport = async () => {
@@ -693,113 +605,20 @@ export default function BlueprintEditor() {
     const gridWidth = state.beadRegions.reduce((max, r) => Math.max(max, r.gridX), 0) + 1;
     const gridHeight = state.beadRegions.reduce((max, r) => Math.max(max, r.gridY), 0) + 1;
 
-    // 创建临时 canvas 用于导出（高分辨率）
-    const exportPixelSize = 30; // 导出时的像素大小
-    const exportCanvas = document.createElement('canvas');
-    exportCanvas.width = gridWidth * exportPixelSize;
-    exportCanvas.height = gridHeight * exportPixelSize;
-    const exportCtx = exportCanvas.getContext('2d');
-    if (!exportCtx) return;
-
-    // 绘制背景
-    exportCtx.fillStyle = '#ffffff';
-    exportCtx.fillRect(0, 0, exportCanvas.width, exportCanvas.height);
-
-    // 绘制豆子
-    state.beadRegions.forEach(region => {
-      const x = region.gridX * exportPixelSize;
-      const y = region.gridY * exportPixelSize;
-
-      if (region.matchedColor) {
-        exportCtx.fillStyle = region.matchedColor.hex;
-      } else {
-        exportCtx.fillStyle = `rgb(${region.color.r}, ${region.color.g}, ${region.color.b})`;
+    const exportCanvas = createBlueprintExportCanvas(
+      state.beadRegions,
+      30,
+      state.showLabels,
+      {
+        hideWhiteLabels: state.hideWhiteLabels,
+        hideBlackLabels: state.hideBlackLabels,
+        hiddenColorIds: state.hiddenColorIds,
       }
-
-      exportCtx.fillRect(x + 1, y + 1, exportPixelSize - 2, exportPixelSize - 2);
-
-      // 绘制标签（根据 state.showLabels 决定）
-      if (state.showLabels && region.matchedColor && !state.hiddenColorIds.has(region.matchedColor.id)) {
-        // 检查是否隐藏白色标签
-        if (state.hideWhiteLabels) {
-          const isWhite = (
-            region.matchedColor.name.toLowerCase() === "white" ||
-            region.matchedColor.name === "白色" ||
-            region.matchedColor.name === "极浅灰" ||
-            region.matchedColor.hex.toLowerCase() === "#ffffff" ||
-            region.matchedColor.hex.toLowerCase() === "#fbfbfb" ||
-            region.matchedColor.id === "H02"
-          );
-          if (isWhite) return;
-        }
-
-        // 检查是否隐藏黑色标签
-        if (state.hideBlackLabels) {
-          const isBlack = (
-            region.matchedColor.name.toLowerCase() === "black" ||
-            region.matchedColor.name === "黑色" ||
-            region.matchedColor.name === "炭黑1" ||
-            region.matchedColor.hex.toLowerCase() === "#000000" ||
-            region.matchedColor.hex.toLowerCase() === "#010101" ||
-            region.matchedColor.id === "H07"
-          );
-          if (isBlack) return;
-        }
-
-        const fontSize = Math.floor(exportPixelSize * 0.28);
-        exportCtx.font = `bold ${fontSize}px Arial, sans-serif`;
-        exportCtx.textAlign = "center";
-        exportCtx.textBaseline = "middle";
-
-        const centerX = x + exportPixelSize / 2;
-        const centerY = y + exportPixelSize / 2;
-
-        // 根据背景亮度选择文字颜色
-        const brightness = (region.color.r * 299 + region.color.g * 587 + region.color.b * 114) / 1000;
-        const textColor = brightness > 128 ? "#000000" : "#FFFFFF";
-        exportCtx.fillStyle = textColor;
-        exportCtx.fillText(region.matchedColor.id, centerX, centerY);
-      }
-    });
-
-    // 绘制网格
-    exportCtx.lineWidth = 1;
-    exportCtx.strokeStyle = "rgba(0,0,0,0.15)";
-    exportCtx.beginPath();
-    for (let x = 0; x <= gridWidth; x++) {
-      if (x % 5 === 0) continue;
-      exportCtx.moveTo(x * exportPixelSize, 0);
-      exportCtx.lineTo(x * exportPixelSize, exportCanvas.height);
-    }
-    for (let y = 0; y <= gridHeight; y++) {
-      if (y % 5 === 0) continue;
-      exportCtx.moveTo(0, y * exportPixelSize);
-      exportCtx.lineTo(exportCanvas.width, y * exportPixelSize);
-    }
-    exportCtx.stroke();
-
-    // 绘制 5x5 网格
-    exportCtx.lineWidth = 3;
-    exportCtx.strokeStyle = "rgba(0,0,0,0.6)";
-    exportCtx.beginPath();
-    for (let x = 0; x <= gridWidth; x += 5) {
-      exportCtx.moveTo(x * exportPixelSize, 0);
-      exportCtx.lineTo(x * exportPixelSize, exportCanvas.height);
-    }
-    for (let y = 0; y <= gridHeight; y += 5) {
-      exportCtx.moveTo(0, y * exportPixelSize);
-      exportCtx.lineTo(exportCanvas.width, y * exportPixelSize);
-    }
-    exportCtx.stroke();
-
+    );
     const imgData = exportCanvas.toDataURL('image/png');
 
     if (exportFormat === 'png') {
-      // 导出为 PNG
-      const link = document.createElement('a');
-      link.download = 'bead-blueprint.png';
-      link.href = imgData;
-      link.click();
+      downloadCanvasAsPng(exportCanvas, 'bead-blueprint.png');
       toast.success('PNG 导出成功');
 
       // 如果需要保存色号，导出色号统计为文本文件
@@ -886,9 +705,10 @@ export default function BlueprintEditor() {
           let y = titleHeight + headerHeight;
           listCtx.font = '13px Arial, sans-serif';
 
-          colorStats.forEach(([colorId, count], index) => {
-            const color = currentPalette.find(c => c.id === colorId);
-            if (!color) return;
+          colorStats.forEach((stat, index) => {
+            const color = stat.color;
+            const colorId = stat.colorId;
+            const count = stat.count;
 
             // 行背景（交替）
             if (index % 2 === 0) {
@@ -982,7 +802,7 @@ export default function BlueprintEditor() {
   };
 
   // 生成色号统计文本
-  const generateColorKeyText = (colorStats: [string, number][]) => {
+  const generateColorKeyText = (colorStats: ReturnType<typeof getColorStats>) => {
     let text = `拼豆色号统计\n`;
     text += `生成时间: ${new Date().toLocaleString()}\n`;
     text += `色卡: ${PALETTES[state.selectedPalette]?.name || state.selectedPalette}\n`;
@@ -990,9 +810,8 @@ export default function BlueprintEditor() {
     text += `\n色号列表:\n`;
     text += `----------------\n`;
 
-    colorStats.forEach(([colorId, count]) => {
-      const color = currentPalette.find(c => c.id === colorId);
-      text += `${colorId}: ${count}个 - ${color?.name || ''}\n`;
+    colorStats.forEach((stat) => {
+      text += `${stat.colorId}: ${stat.count}个 - ${stat.color.name}\n`;
     });
 
     text += `\n合计: ${colorStats.length} 种颜色\n`;
@@ -1080,8 +899,11 @@ export default function BlueprintEditor() {
         const centerX = x + pixelSize / 2;
         const centerY = y + pixelSize / 2;
 
-        // 根据背景亮度选择文字颜色
-        const brightness = (region.color.r * 299 + region.color.g * 587 + region.color.b * 114) / 1000;
+        // 编辑模式会优先更新 matchedColor，这里必须按当前显示色计算文字颜色
+        const displayColor = region.matchedColor
+          ? hexToRgb(region.matchedColor.hex)
+          : region.color;
+        const brightness = (displayColor.r * 299 + displayColor.g * 587 + displayColor.b * 114) / 1000;
         const textColor = brightness > 128 ? "#000000" : "#FFFFFF";
 
         // 文字阴影效果
@@ -1153,67 +975,79 @@ export default function BlueprintEditor() {
   }, [isPainting, state.selectedColor]);
 
   const colorStats = getColorStats();
+  useEffect(() => {
+    if (recognitionDebug?.contentRegion) {
+      setShowRecognitionPreview(true);
+    }
+  }, [recognitionDebug?.contentRegion]);
+
+  const showRightDock = (showRecognitionPreview && Boolean(recognitionDebug?.contentRegion)) || state.showColorStats || (state.isEditMode && state.showColorSelector);
+  const statusItems = [
+    { label: "模式", value: state.isEditMode ? "编辑" : "识别", tone: state.isEditMode ? "accent" as const : "default" as const },
+    { label: "网格", value: `${state.gridWidth} x ${state.gridHeight}` },
+    { label: "色号", value: colorStats.length, tone: "muted" as const },
+    { label: "缩放", value: `${Math.round(state.canvasScale * 100)}%`, tone: "muted" as const },
+    { label: "识别", value: recognitionDebug ? `${(recognitionDebug.detectionQuality * 100).toFixed(1)}%` : "待识别", tone: recognitionDebug ? "accent" as const : "muted" as const },
+  ];
 
   return (
     <div className="h-screen flex flex-col bg-background font-body overflow-hidden">
       <Header />
 
-      <div className="flex-1 flex overflow-hidden">
-        {/* 左侧控制面板 */}
-        <Sidebar
-          // 状态
-          selectedPalette={state.selectedPalette}
-          showGrid={state.showGrid}
-          showLabels={state.showLabels}
-          hideWhiteLabels={state.hideWhiteLabels}
-          hideBlackLabels={state.hideBlackLabels}
-          filterNoise={state.filterNoise}
-          noiseThreshold={state.noiseThreshold}
-          boundaryDetectionMethod={state.boundaryDetectionMethod}
-          colorSampleMethod={state.colorSampleMethod}
-          excludeEdgePixels={state.excludeEdgePixels}
-          colorMatchAlgorithm={state.colorMatchAlgorithm}
-          beadRegions={state.beadRegions}
-          isProcessing={state.isProcessing}
+      <div className="flex-1 flex overflow-hidden min-h-0">
+        <WorkbenchSidebar
+          title="识别设置"
+          collapsed={isSidebarCollapsed}
+          onToggle={() => setIsSidebarCollapsed(prev => !prev)}
+        >
+          <Sidebar
+            mode="embedded"
+            selectedPalette={state.selectedPalette}
+            showGrid={state.showGrid}
+            showLabels={state.showLabels}
+            hideWhiteLabels={state.hideWhiteLabels}
+            hideBlackLabels={state.hideBlackLabels}
+            filterNoise={state.filterNoise}
+            noiseThreshold={state.noiseThreshold}
+            mergeColors={state.mergeColors}
+            mergeTolerance={state.mergeTolerance}
+            boundaryDetectionMethod={state.boundaryDetectionMethod}
+            colorSampleMethod={state.colorSampleMethod}
+            excludeEdgePixels={state.excludeEdgePixels}
+            colorMatchAlgorithm={state.colorMatchAlgorithm}
+            beadRegions={state.beadRegions}
+            isProcessing={isProcessing}
+            onStateChange={(updates) => setState(prev => ({ ...prev, ...updates }))}
+            onPaletteChange={(palette) => {
+              setState(prev => ({ ...prev, selectedPalette: palette }));
+              if (rawBeadRegions.length > 0) {
+                applyWorkflowPostProcessing(rawBeadRegions, { paletteKey: palette, resetHistory: true });
+              }
+            }}
+            onRecognitionApply={() => {
+              if (state.originalImage) {
+                runBlueprintRecognition(state.originalImage);
+              } else {
+                toast.error('请先导入图纸');
+              }
+            }}
+            onPostProcessApply={() => {
+              if (rawBeadRegions.length === 0) {
+                toast.error('没有可用于后处理的识别结果');
+                return;
+              }
+              applyWorkflowPostProcessing(rawBeadRegions, { resetHistory: true });
+              toast.success('已应用后处理');
+            }}
+            onExport={() => setShowExportDialog(true)}
+            onNewGrid={() => setShowNewGridDialog(true)}
+            getRootProps={getRootProps}
+            getInputProps={getInputProps}
+            isDragActive={isDragActive}
+          />
+        </WorkbenchSidebar>
 
-          // 回调
-          onStateChange={(updates) => setState(prev => ({ ...prev, ...updates }))}
-          onPaletteChange={(palette) => {
-            setState(prev => ({ ...prev, selectedPalette: palette }));
-            // 重新匹配颜色
-            if (state.beadRegions.length > 0) {
-              const paletteColors = PALETTES[palette]?.colors || [];
-              setState(prev => ({
-                ...prev,
-                beadRegions: prev.beadRegions.map(region => ({
-                  ...region,
-                  matchedColor: findNearestColor(region.color.r, region.color.g, region.color.b, paletteColors, { algorithm: 'weighted' }),
-                })),
-              }));
-            }
-          }}
-          onNoiseFilterApply={() => {
-            const filtered = applyNoiseFilter(state.beadRegions, state.noiseThreshold);
-            setState(prev => ({ ...prev, beadRegions: filtered }));
-            saveToHistory(filtered);
-          }}
-          onUndo={undo}
-          onExport={() => setShowExportDialog(true)}
-          onNewGrid={() => setShowNewGridDialog(true)}
-
-          // 上传相关
-          getRootProps={getRootProps}
-          getInputProps={getInputProps}
-          isDragActive={isDragActive}
-
-          // 其他
-          currentPalette={currentPalette}
-          history={history}
-        />
-
-
-        {/* 主画布区域 */}
-        <main className="flex-1 bg-muted/20 relative overflow-hidden flex flex-col">
+        <main className="flex-1 bg-muted/20 relative overflow-hidden flex flex-col min-h-0">
           {/* 工具栏 */}
           <Toolbar
             canvasScale={state.canvasScale}
@@ -1225,6 +1059,7 @@ export default function BlueprintEditor() {
             historyIndex={historyIndex}
             showColorStats={state.showColorStats}
             colorStatsCount={colorStats.length}
+            showRecognitionPreview={showRecognitionPreview && Boolean(recognitionDebug?.contentRegion)}
 
             onZoomIn={() => setState(prev => ({ ...prev, canvasScale: Math.min(5, prev.canvasScale + 0.2) }))}
             onZoomOut={() => setState(prev => ({ ...prev, canvasScale: Math.max(0.1, prev.canvasScale - 0.2) }))}
@@ -1235,236 +1070,209 @@ export default function BlueprintEditor() {
             onTogglePipetteMode={togglePipetteMode}
             onUndo={undo}
             onClearSelection={() => setState(prev => ({ ...prev, selectedColor: null }))}
-            onToggleColorSelector={() => setState(prev => ({ ...prev, showColorSelector: !prev.showColorSelector }))}
-            onToggleColorStats={() => setState(prev => ({ ...prev, showColorStats: !prev.showColorStats }))}
+            onToggleColorSelector={() => {
+              if (!state.showColorSelector) setIsRightDockCollapsed(false);
+              setState(prev => ({ ...prev, showColorSelector: !prev.showColorSelector }));
+            }}
+            onToggleColorStats={() => {
+              if (!state.showColorStats) setIsRightDockCollapsed(false);
+              setState(prev => ({ ...prev, showColorStats: !prev.showColorStats }));
+            }}
+            onToggleRecognitionPreview={() => {
+              setIsRightDockCollapsed(false);
+              setIsPreviewSectionCollapsed(false);
+              setShowRecognitionPreview(prev => !prev || !recognitionDebug?.contentRegion ? Boolean(recognitionDebug?.contentRegion) : false);
+            }}
           />
-
-
-
-          {/* 画布显示区域 */}
-          <div
-            ref={canvasContainerRef}
-            className="flex-1 overflow-hidden p-8 flex items-center justify-center bg-[url('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAiIGhlaWdodD0iMjAiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHBhdGggZD0iTTEgMWgydjJIMUMxeiIgZmlsbD0iIzAwMDAwMDIwIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiLz48L3N2Zz4=')] relative select-none"
-            onMouseDown={handleMouseDown}
-            onMouseMove={handleMouseMove}
-            onMouseUp={handleMouseUp}
-            onMouseLeave={handleMouseLeave}
-          >
-            {state.beadRegions.length > 0 ? (
-              <div
-                className="bg-white p-1 border-4 border-black shadow-2xl origin-center"
-                style={{
-                  transform: `translate(${state.canvasTranslateX}px, ${state.canvasTranslateY}px)`,
-                  cursor: isDragging ? 'grabbing' : (state.isEditMode ? (state.isPipetteMode ? 'crosshair' : 'pointer') : 'grab'),
-                  transition: isDragging ? 'none' : 'transform 0.1s ease-out',
-                }}
-              >
-                <canvas
-                  ref={canvasRef}
-                  className="block"
-                  onMouseDown={handleCanvasMouseDown}
-                  onMouseMove={handleCanvasMouseMove}
-                />
-              </div>
-            ) : state.originalImage ? (
-              <div className="text-center space-y-4">
-                <Loader2 className="w-12 h-12 animate-spin mx-auto text-muted-foreground" />
-                <p className="text-muted-foreground">正在处理图纸...</p>
-              </div>
-            ) : (
-              <div className="text-center space-y-4">
-                <div className="w-24 h-24 mx-auto border-4 border-black border-dashed rounded-full flex items-center justify-center">
-                  <ImageIcon className="w-10 h-10 text-muted-foreground" />
-                </div>
-                <h3 className="font-display text-2xl">请先上传图纸</h3>
-                <p className="text-sm text-muted-foreground">
-                  支持导入有明确边界的拼豆图纸
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  提示：滚轮缩放 · 中键拖动
-                </p>
-              </div>
-            )}
-
-            {/* 编辑模式提示 */}
-            {state.isEditMode && state.beadRegions.length > 0 && (
-              <div className="absolute bottom-4 left-4 right-4 bg-white border-4 border-black shadow-2xl p-4">
-                <div className="flex items-center justify-between">
-                  <div className="text-sm">
-                    {state.isPipetteMode ? (
-                      <span className="font-bold text-primary">🔍 取色模式：点击豆子吸取颜色</span>
-                    ) : state.selectedColor ? (
-                      <span className="font-bold">✏️ 点击或拖动画布批量替换为 <span className="text-primary">{state.selectedColor.id}</span></span>
-                    ) : (
-                      <span className="text-muted-foreground">请从右侧色号选择器选择颜色，或使用取色器</span>
-                    )}
-                  </div>
-                  <div className="text-xs text-muted-foreground">
-                    中键拖动移动视图 · Ctrl+Z 撤回
-                  </div>
-                </div>
-              </div>
-            )}
-            {/* 豆子太小提示 - 显示在画布底部中央 */}
-            {state.showLabels && state.beadRegions.length > 0 && Math.floor(20 * state.canvasScale * 0.28) < 5 && !state.isEditMode && (
-              <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-amber-50 border-2 border-amber-400 shadow-lg px-4 py-2 rounded">
-                <span className="text-xs text-amber-700 font-medium">⚠️ 当前显示豆子太小，色号不显示（建议放大画布）</span>
-              </div>
-            )}
-          </div>
-
-          {/* 色号统计面板 */}
-          {state.showColorStats && colorStats.length > 0 && (
-            <div className="absolute top-16 right-4 w-72 bg-white border-4 border-black shadow-2xl">
-              <div className="flex items-center justify-between p-3 border-b-2 border-black bg-muted">
-                <div className="flex items-center gap-2">
-                  <Palette className="w-4 h-4" />
-                  <span className="font-bold text-sm">色号统计</span>
-                </div>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setState(prev => ({ ...prev, showColorStats: false }))}
-                  className="h-7 w-7 p-0"
+          <div className="flex-1 flex overflow-hidden min-h-0">
+            <div
+              ref={canvasContainerRef}
+              className="flex-1 overflow-hidden p-8 flex items-center justify-center bg-[url('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAiIGhlaWdodD0iMjAiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHBhdGggZD0iTTEgMWgydjJIMUMxeiIgZmlsbD0iIzAwMDAwMDIwIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiLz48L3N2Zz4=')] relative select-none"
+              onMouseDown={handleMouseDown}
+              onMouseMove={handleMouseMove}
+              onMouseUp={handleMouseUp}
+              onMouseLeave={handleMouseLeave}
+            >
+              {state.beadRegions.length > 0 ? (
+                <div
+                  className="bg-white p-1 border-4 border-black shadow-2xl origin-center"
+                  style={{
+                    transform: `translate(${state.canvasTranslateX}px, ${state.canvasTranslateY}px)`,
+                    cursor: isDragging ? 'grabbing' : (state.isEditMode ? (state.isPipetteMode ? 'crosshair' : 'pointer') : 'grab'),
+                    transition: isDragging ? 'none' : 'transform 0.1s ease-out',
+                  }}
                 >
-                  <X className="w-4 h-4" />
-                </Button>
-              </div>
+                  <canvas
+                    ref={canvasRef}
+                    className="block"
+                    onMouseDown={handleCanvasMouseDown}
+                    onMouseMove={handleCanvasMouseMove}
+                  />
+                </div>
+              ) : state.originalImage ? (
+                <div className="text-center space-y-4">
+                  <Loader2 className="w-12 h-12 animate-spin mx-auto text-muted-foreground" />
+                  <p className="text-muted-foreground">正在处理图纸...</p>
+                </div>
+              ) : (
+                <div className="text-center space-y-4">
+                  <div className="w-24 h-24 mx-auto border-4 border-black border-dashed rounded-full flex items-center justify-center">
+                    <ImageIcon className="w-10 h-10 text-muted-foreground" />
+                  </div>
+                  <h3 className="font-display text-2xl">请先上传图纸</h3>
+                  <p className="text-sm text-muted-foreground">
+                    支持导入有明确边界的拼豆图纸
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    提示：滚轮缩放 · 中键拖动
+                  </p>
+                </div>
+              )}
 
-              <ScrollArea className="h-64">
-                <div className="p-2 space-y-1">
-                  {colorStats.map(([colorId, count]) => {
-                    const color = currentPalette.find(c => c.id === colorId);
-                    if (!color) return null;
+              {state.isEditMode && state.beadRegions.length > 0 && (
+                <div className="absolute bottom-4 left-4 right-4 bg-white border-4 border-black shadow-2xl p-4">
+                  <div className="flex items-center justify-between">
+                    <div className="text-sm">
+                      {state.isPipetteMode ? (
+                        <span className="font-bold text-primary">🔍 取色模式：点击豆子吸取颜色</span>
+                      ) : state.selectedColor ? (
+                        <span className="font-bold">✏️ 点击或拖动画布批量替换为 <span className="text-primary">{state.selectedColor.id}</span></span>
+                      ) : (
+                        <span className="text-muted-foreground">请从右侧色号选择器选择颜色，或使用取色器</span>
+                      )}
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      中键拖动移动视图 · Ctrl+Z 撤回
+                    </div>
+                  </div>
+                </div>
+              )}
 
-                    return (
-                      <div
-                        key={colorId}
-                        onClick={() => state.isEditMode && selectColor(color)}
-                        className={cn(
-                          "flex items-center gap-2 p-2 rounded hover:bg-muted/50",
-                          state.isEditMode && "cursor-pointer hover:bg-muted",
-                          state.isEditMode && state.selectedColor?.id === colorId && "ring-2 ring-black"
-                        )}
-                      >
-                        <div
-                          className="w-8 h-8 rounded border-2 border-black flex-shrink-0"
-                          style={{ backgroundColor: color.hex }}
-                        />
-                        <div className="flex-1">
-                          <div className="flex items-center justify-between">
-                            <span className="font-mono font-bold text-sm">{colorId}</span>
-                            <span className="text-xs text-muted-foreground">{count}个</span>
+              {state.showLabels && state.beadRegions.length > 0 && Math.floor(20 * state.canvasScale * 0.28) < 5 && !state.isEditMode && (
+                <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-amber-50 border-2 border-amber-400 shadow-lg px-4 py-2 rounded">
+                  <span className="text-xs text-amber-700 font-medium">⚠️ 当前显示豆子太小，色号不显示（建议放大画布）</span>
+                </div>
+              )}
+            </div>
+
+            {showRightDock && (
+              <WorkbenchRightDock
+                collapsed={isRightDockCollapsed}
+                onToggle={() => setIsRightDockCollapsed(prev => !prev)}
+              >
+                <div className="space-y-3 p-0 pt-12">
+                  {showRecognitionPreview && state.processedCanvas && recognitionDebug?.contentRegion && (
+                    <WorkbenchDockSection
+                      title="识别预览"
+                      collapsed={isPreviewSectionCollapsed}
+                      onToggleCollapsed={() => setIsPreviewSectionCollapsed(prev => !prev)}
+                      onClose={() => setShowRecognitionPreview(false)}
+                    >
+                      <div className="p-3 space-y-3 bg-white">
+                        <div className="relative overflow-hidden border border-black/10 bg-slate-100 rounded-sm">
+                          <img
+                            src={state.processedCanvas.toDataURL('image/png')}
+                            alt="识别源图预览"
+                            className="block h-auto w-full"
+                          />
+                          <div
+                            className="absolute border-2 border-red-500 bg-red-500/10"
+                            style={{
+                              left: `${(recognitionDebug.contentRegion.x / state.processedCanvas.width) * 100}%`,
+                              top: `${(recognitionDebug.contentRegion.y / state.processedCanvas.height) * 100}%`,
+                              width: `${(recognitionDebug.contentRegion.width / state.processedCanvas.width) * 100}%`,
+                              height: `${(recognitionDebug.contentRegion.height / state.processedCanvas.height) * 100}%`,
+                            }}
+                          />
+                        </div>
+                        <div className="grid grid-cols-2 gap-2 text-xs">
+                          <div className="rounded border border-black/10 bg-muted px-2 py-1.5">
+                            <div className="text-muted-foreground">质量</div>
+                            <div className="font-mono font-bold">{(recognitionDebug.detectionQuality * 100).toFixed(1)}%</div>
                           </div>
-                          <div className="text-xs text-muted-foreground truncate">
-                            {color.name}
+                          <div className="rounded border border-black/10 bg-muted px-2 py-1.5">
+                            <div className="text-muted-foreground">格距</div>
+                            <div className="font-mono font-bold">{recognitionDebug.estimatedBeadSize}px</div>
+                          </div>
+                          <div className="rounded border border-black/10 bg-muted px-2 py-1.5 col-span-2">
+                            <div className="text-muted-foreground">主图区</div>
+                            <div className="font-mono font-bold">
+                              x:{recognitionDebug.contentRegion.x} y:{recognitionDebug.contentRegion.y}
+                            </div>
+                            <div className="font-mono">
+                              {recognitionDebug.contentRegion.width} x {recognitionDebug.contentRegion.height}
+                              {typeof recognitionDebug.gridConfidence === 'number' && (
+                                <> · 网格置信度 {(recognitionDebug.gridConfidence * 100).toFixed(1)}%</>
+                              )}
+                            </div>
                           </div>
                         </div>
                       </div>
-                    );
-                  })}
-                </div>
-              </ScrollArea>
-            </div>
-          )}
+                    </WorkbenchDockSection>
+                  )}
 
-          {/* 色号选择器面板（编辑模式） */}
-          {state.isEditMode && state.showColorSelector && (
-            <div className="absolute top-16 left-4 w-80 bg-white border-4 border-black shadow-2xl">
-              <div className="flex items-center justify-between p-3 border-b-2 border-black bg-muted">
-                <div className="flex items-center gap-2">
-                  <Palette className="w-4 h-4" />
-                  <span className="font-bold text-sm">色号选择器</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <div className="text-xs text-muted-foreground">
-                    {currentPalette.length} 色
-                  </div>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => setState(prev => ({ ...prev, showColorSelector: false }))}
-                    className="h-7 w-7 p-0"
-                  >
-                    <X className="w-4 h-4" />
-                  </Button>
-                </div>
-              </div>
-
-              <div className="p-3 space-y-3">
-                {/* 搜索框 */}
-                <Input
-                  placeholder="搜索色号或名称..."
-                  value={colorSearchQuery}
-                  onChange={(e) => setColorSearchQuery(e.target.value)}
-                  className="h-8 text-sm"
-                />
-
-                {/* 色号网格 */}
-                <ScrollArea className="h-64 border-2 border-black rounded">
-                  <div className="p-2 grid grid-cols-6 gap-1">
-                    {currentPalette
-                      .filter(color =>
-                        color.id.toLowerCase().includes(colorSearchQuery.toLowerCase()) ||
-                        color.name.toLowerCase().includes(colorSearchQuery.toLowerCase())
-                      )
-                      .map((color) => {
-                        // 计算文字颜色
-                        const rgb = hexToRgb(color.hex);
-                        const brightness = (rgb.r * 299 + rgb.g * 587 + rgb.b * 114) / 1000;
-                        const textColor = brightness > 128 ? "#000000" : "#FFFFFF";
-
-                        return (
-                          <button
-                            key={color.id}
-                            onClick={() => selectColor(color)}
-                            className={cn(
-                              "w-full aspect-square rounded border-2 border-black/20 hover:border-black hover:scale-110 transition-all relative flex items-center justify-center",
-                              state.selectedColor?.id === color.id && "ring-2 ring-black ring-offset-2"
-                            )}
-                            style={{ backgroundColor: color.hex }}
-                            title={`${color.id} - ${color.name}`}
-                          >
-                            <span
-                              className="text-xs font-bold font-mono leading-tight"
-                              style={{ color: textColor }}
-                            >
-                              {color.id}
-                            </span>
-                          </button>
-                        );
-                      })}
-                  </div>
-                </ScrollArea>
-
-                {/* 当前选中颜色 */}
-                {state.selectedColor && (
-                  <div className="flex items-center gap-3 p-3 bg-muted rounded border-2 border-black">
-                    <div
-                      className="w-12 h-12 rounded border-2 border-black flex-shrink-0"
-                      style={{ backgroundColor: state.selectedColor.hex }}
-                    />
-                    <div className="flex-1 min-w-0">
-                      <div className="font-mono font-bold text-lg">{state.selectedColor.id}</div>
-                      <div className="text-sm text-muted-foreground truncate">{state.selectedColor.name}</div>
-                    </div>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => setState(prev => ({ ...prev, selectedColor: null }))}
-                      className="h-8 w-8 p-0"
+                  {state.showColorStats && (
+                    <WorkbenchDockSection
+                      title="色号统计"
+                      collapsed={isStatsSectionCollapsed}
+                      onToggleCollapsed={() => setIsStatsSectionCollapsed(prev => !prev)}
+                      onClose={() => setState(prev => ({ ...prev, showColorStats: false }))}
                     >
-                      <X className="w-4 h-4" />
-                    </Button>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-        </main>
-      </div >
+                      <ColorStatsPanel
+                        colorStats={colorStats}
+                        hiddenColorIds={state.hiddenColorIds}
+                        onToggleVisibility={toggleColorVisibility}
+                        isVisible={state.showColorStats}
+                        onClose={() => setState(prev => ({ ...prev, showColorStats: false }))}
+                        totalBeads={state.beadRegions.length}
+                        isEditMode={state.isEditMode}
+                        selectedColor={state.selectedColor}
+                        onSelectColor={selectColor}
+                        mode="docked"
+                        showHeader={false}
+                      />
+                    </WorkbenchDockSection>
+                  )}
 
-      <Footer />
+                  {state.isEditMode && state.showColorSelector && (
+                    <WorkbenchDockSection
+                      title="色号选择器"
+                      collapsed={isColorSelectorSectionCollapsed}
+                      onToggleCollapsed={() => setIsColorSelectorSectionCollapsed(prev => !prev)}
+                      onClose={() => setState(prev => ({ ...prev, showColorSelector: false }))}
+                    >
+                      <ColorSelector
+                        colors={currentPalette}
+                        selectedColor={state.selectedColor}
+                        onSelectColor={selectColor}
+                        onClearSelection={() => setState(prev => ({ ...prev, selectedColor: null }))}
+                        isVisible={state.isEditMode && state.showColorSelector}
+                        onClose={() => setState(prev => ({ ...prev, showColorSelector: false }))}
+                        title="色号选择器"
+                        mode="docked"
+                        showHeader={false}
+                      />
+                    </WorkbenchDockSection>
+                  )}
+                </div>
+              </WorkbenchRightDock>
+            )}
+          </div>
+
+          <WorkbenchStatusBar
+            items={statusItems}
+            hint={
+              state.isEditMode
+                ? (state.isPipetteMode
+                  ? "取色模式 · 点击格子吸取色号"
+                  : state.selectedColor
+                    ? `批量绘制 ${state.selectedColor.id} · Ctrl+Z 撤回`
+                    : "编辑模式 · 从右侧选择颜色后绘制")
+                : "滚轮缩放 · 中键拖动画布 · 右侧查看识别预览"
+            }
+          />
+        </main>
+      </div>
 
       <ImageCropper
         open={state.showCropper}

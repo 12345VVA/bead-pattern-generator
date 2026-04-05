@@ -3,7 +3,7 @@ import { useDropzone } from "react-dropzone";
 import { Upload, Image as ImageIcon, ZoomIn, ZoomOut, Grid3X3, Download, Palette, List, Settings2, X, ChevronLeft, Eye, EyeOff, Edit3, Pipette, Undo } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { PixelButton, PixelCard } from "@/components/PixelUI";
-import { loadImage, getPixelData, processImage, clearColorCache, hexToRgb } from "@/lib/image-processing";
+import { loadImage, clearColorCache, hexToRgb } from "@/lib/image-processing";
 import type { ProcessedResult, ColorMatchConfig, ColorMatchAlgorithm } from "@/lib/image-processing";
 import { PALETTES, loadDomesticBrandPalette, SUPPORTED_BRANDS, type BrandCode } from "@/lib/colors";
 import type { PaletteKey } from "@/lib/colors";
@@ -22,6 +22,13 @@ import { Switch } from "@/components/ui/switch";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import type { BeadColor } from "@/lib/colors";
+import { usePatternGeneration } from "@/hooks/usePatternGeneration";
+import { useUndoHistory } from "@/hooks/useUndoHistory";
+import { getProcessedPatternStats } from "@/lib/pattern-stats";
+import { WorkbenchSidebar } from "@/components/Workbench/WorkbenchSidebar";
+import { WorkbenchStatusBar } from "@/components/Workbench/WorkbenchStatusBar";
+import { WorkbenchRightDock } from "@/components/Workbench/WorkbenchRightDock";
+import { WorkbenchDockSection } from "@/components/Workbench/WorkbenchDockSection";
 
 interface EditorState {
   originalImage: HTMLImageElement | null;
@@ -39,7 +46,6 @@ interface EditorState {
   hideWhiteLabels: boolean;
   hideBlackLabels: boolean;
   showLabels: boolean;
-  processedData: ProcessedResult | null;
   showExportDialog: boolean;
   imageSrc: string | null;
   showCropper: boolean;
@@ -62,13 +68,6 @@ interface EditorState {
   showColorSelector: boolean; // 显示色号选择器
 }
 
-// 历史记录类型
-interface HistoryEntry {
-  pixels: Uint8ClampedArray;
-  colorCounts: Map<string, number>;
-  beadGrid: (string | null)[];
-}
-
 export default function Editor() {
   const [state, setState] = useState<EditorState>({
     originalImage: null,
@@ -86,7 +85,6 @@ export default function Editor() {
     hideWhiteLabels: false,
     hideBlackLabels: false,
     showLabels: false,
-    processedData: null,
     showExportDialog: false,
     imageSrc: null,
     showCropper: false,
@@ -105,13 +103,28 @@ export default function Editor() {
     showColorSelector: false,
   });
 
-  // 历史记录
-  const [history, setHistory] = useState<HistoryEntry[]>([]);
-  const [historyIndex, setHistoryIndex] = useState(-1);
+  const {
+    history,
+    historyIndex,
+    canUndo,
+    reset: resetHistory,
+    push: pushHistory,
+    undo: undoHistory,
+  } = useUndoHistory<ProcessedResult>({
+    clone: (data) => ({
+      pixels: new Uint8ClampedArray(data.pixels),
+      colorCounts: new Map(data.colorCounts),
+      beadGrid: [...data.beadGrid],
+    }),
+  });
 
   // 批量绘制状态
   const [isPainting, setIsPainting] = useState(false);
   const [paintedBeads, setPaintedBeads] = useState<Set<string>>(new Set());
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [isRightDockCollapsed, setIsRightDockCollapsed] = useState(false);
+  const [isStatsSectionCollapsed, setIsStatsSectionCollapsed] = useState(false);
+  const [isColorSelectorSectionCollapsed, setIsColorSelectorSectionCollapsed] = useState(false);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
@@ -141,6 +154,22 @@ export default function Editor() {
       { id: "DEFAULT", name: "White", hex: "#FFFFFF", brand: "Default" }
     ];
   }, [state.palette, state.domesticBrand, state.customPalette]);
+
+  const { processedData, setProcessedData } = usePatternGeneration({
+    originalImage: state.originalImage,
+    gridWidth: state.gridWidth,
+    gridHeight: state.gridHeight,
+    currentPalette,
+    colorMatchAlgorithm: state.colorMatchAlgorithm,
+    dither: state.dither,
+    ditherStrength: state.ditherStrength,
+    ignoreWhite: state.ignoreWhite,
+    ignoreBlack: state.ignoreBlack,
+    filterNoise: state.filterNoise,
+    noiseThreshold: state.noiseThreshold,
+    mergeColors: state.mergeColors,
+    mergeTolerance: state.mergeTolerance,
+  });
 
   // File Upload Handler
   const onDrop = (acceptedFiles: File[]) => {
@@ -209,273 +238,6 @@ export default function Editor() {
     clearColorCache();
   }, [state.palette, state.domesticBrand, state.customPalette]);
 
-  // Process Image Effect
-  useEffect(() => {
-    if (!state.originalImage) return;
-
-    // Get raw pixels first
-    const rawPixels = getPixelData(state.originalImage, state.gridWidth, state.gridHeight);
-
-    // 颜色匹配配置
-    const colorMatchConfig: ColorMatchConfig = {
-      algorithm: state.colorMatchAlgorithm,
-      useCache: true
-    };
-
-    // Quantize and Dither
-    let result = processImage(
-      rawPixels,
-      state.gridWidth,
-      state.gridHeight,
-      currentPalette,
-      state.dither,
-      state.ditherStrength,
-      state.ignoreWhite,
-      state.ignoreBlack,
-      colorMatchConfig
-    );
-
-    // 应用杂色过滤
-    if (state.filterNoise) {
-      const { pixels: filteredPixels, colorCounts: filteredCounts, beadGrid: filteredGrid } = applyNoiseFilter(
-        result.pixels,
-        result.colorCounts,
-        result.beadGrid,
-        state.gridWidth,
-        state.gridHeight,
-        state.noiseThreshold,
-        currentPalette
-      );
-      result = { pixels: filteredPixels, colorCounts: filteredCounts, beadGrid: filteredGrid };
-    }
-
-    // 应用颜色合并
-    if (state.mergeColors) {
-      const { pixels: mergedPixels, colorCounts: mergedCounts, beadGrid: mergedGrid } = applyColorMerge(
-        result.pixels,
-        result.colorCounts,
-        result.beadGrid,
-        state.gridWidth,
-        state.gridHeight,
-        state.mergeTolerance,
-        currentPalette
-      );
-      result = { pixels: mergedPixels, colorCounts: mergedCounts, beadGrid: mergedGrid };
-    }
-
-    setState(prev => ({ ...prev, processedData: result }));
-  }, [state.originalImage, state.gridWidth, state.gridHeight, state.palette, state.domesticBrand, state.customPalette, state.dither, state.ditherStrength, state.ignoreWhite, state.ignoreBlack, state.colorMatchAlgorithm, currentPalette, state.filterNoise, state.noiseThreshold, state.mergeColors, state.mergeTolerance]);
-
-  // 杂色过滤函数
-  const applyNoiseFilter = (
-    pixels: Uint8ClampedArray,
-    colorCounts: Map<string, number>,
-    beadGrid: (string | null)[],
-    width: number,
-    height: number,
-    threshold: number,
-    palette: BeadColor[]
-  ) => {
-    const newPixels = new Uint8ClampedArray(pixels);
-    const newColorCounts = new Map<string, number>();
-    const newBeadGrid: (string | null)[] = new Array(width * height).fill(null);
-
-    // 找出需要保留的颜色（使用数量 >= 阈值）
-    const validColors = new Set<string>();
-    const colorReplacementMap = new Map<string, string>(); // 噪声颜色 -> 替换颜色
-
-    // 统计每个颜色，找出有效颜色和需要替换的噪声颜色
-    const sortedColors = Array.from(colorCounts.entries())
-      .sort(([, a], [, b]) => b - a);
-
-    for (const [colorId, count] of sortedColors) {
-      if (count >= threshold) {
-        validColors.add(colorId);
-      } else {
-        // 找到最接近的有效颜色作为替换
-        const noiseColor = palette.find(c => c.id === colorId);
-        if (!noiseColor) continue;
-
-        const noiseRgb = hexToRgb(noiseColor.hex);
-        let minDist = Infinity;
-        let replacementColor = '';
-
-        for (const validId of validColors) {
-          const validColor = palette.find(c => c.id === validId);
-          if (!validColor) continue;
-
-          const validRgb = hexToRgb(validColor.hex);
-          const dist = Math.sqrt(
-            Math.pow(noiseRgb.r - validRgb.r, 2) +
-            Math.pow(noiseRgb.g - validRgb.g, 2) +
-            Math.pow(noiseRgb.b - validRgb.b, 2)
-          );
-
-          if (dist < minDist) {
-            minDist = dist;
-            replacementColor = validId;
-          }
-        }
-
-        if (replacementColor) {
-          colorReplacementMap.set(colorId, replacementColor);
-        } else if (validColors.size > 0) {
-          // 如果没有找到，使用使用最多的颜色
-          const mostUsedId = sortedColors[0]?.[0];
-          if (mostUsedId) {
-            colorReplacementMap.set(colorId, mostUsedId);
-          }
-        }
-      }
-    }
-
-    // 应用替换
-    for (let i = 0; i < width * height; i++) {
-      const idx = i * 4;
-      const originalBeadId = beadGrid[i];
-
-      if (originalBeadId === null) {
-        // 透明像素保持不变
-        newPixels[idx + 3] = 0;
-        continue;
-      }
-
-      let finalBeadId = originalBeadId;
-
-      // 如果是需要过滤的颜色，使用替换颜色
-      if (colorReplacementMap.has(originalBeadId)) {
-        finalBeadId = colorReplacementMap.get(originalBeadId)!;
-      }
-
-      // 获取最终颜色的 RGB 值
-      const finalColor = palette.find(c => c.id === finalBeadId);
-      if (finalColor) {
-        const rgb = hexToRgb(finalColor.hex);
-        newPixels[idx] = rgb.r;
-        newPixels[idx + 1] = rgb.g;
-        newPixels[idx + 2] = rgb.b;
-        newPixels[idx + 3] = 255;
-      }
-
-      newBeadGrid[i] = finalBeadId;
-      newColorCounts.set(finalBeadId, (newColorCounts.get(finalBeadId) || 0) + 1);
-    }
-
-    return { pixels: newPixels, colorCounts: newColorCounts, beadGrid: newBeadGrid };
-  };
-
-  // 颜色合并函数
-  const applyColorMerge = (
-    pixels: Uint8ClampedArray,
-    colorCounts: Map<string, number>,
-    beadGrid: (string | null)[],
-    width: number,
-    height: number,
-    tolerance: number,
-    palette: BeadColor[]
-  ) => {
-    const newPixels = new Uint8ClampedArray(pixels);
-    const newColorCounts = new Map<string, number>();
-    const newBeadGrid: (string | null)[] = new Array(width * height).fill(null);
-
-    // 计算容差对应的颜色距离阈值（将0-100的容差值转换为实际的颜色距离）
-    // 颜色距离范围大约是0-441（sqrt(255^2 * 3)）
-    const distanceThreshold = (tolerance / 100) * 150;
-
-    // 获取所有使用的颜色ID
-    const usedColorIds = Array.from(colorCounts.keys()).filter(id => id !== null);
-
-    // 为每个颜色找到要合并到的目标颜色
-    const mergeMapping = new Map<string, string>();
-    const processedColors = new Set<string>();
-
-    for (const colorId of usedColorIds) {
-      if (processedColors.has(colorId)) continue;
-
-      const color = palette.find(c => c.id === colorId);
-      if (!color) continue;
-
-      // 找到所有与此颜色相似的其他颜色
-      const colorRgb = hexToRgb(color.hex);
-      const similarColors: string[] = [];
-
-      for (const otherId of usedColorIds) {
-        if (otherId === colorId || processedColors.has(otherId)) continue;
-
-        const otherColor = palette.find(c => c.id === otherId);
-        if (!otherColor) continue;
-
-        const otherRgb = hexToRgb(otherColor.hex);
-        const distance = Math.sqrt(
-          Math.pow(colorRgb.r - otherRgb.r, 2) +
-          Math.pow(colorRgb.g - otherRgb.g, 2) +
-          Math.pow(colorRgb.b - otherRgb.b, 2)
-        );
-
-        if (distance <= distanceThreshold) {
-          similarColors.push(otherId);
-        }
-      }
-
-      // 如果有相似颜色，将它们都合并到使用最多的颜色
-      if (similarColors.length > 0) {
-        const allSimilarColors = [colorId, ...similarColors];
-
-        // 找到使用最多的颜色作为目标
-        let maxCount = 0;
-        let targetColorId = colorId;
-
-        for (const id of allSimilarColors) {
-          const count = colorCounts.get(id) || 0;
-          if (count > maxCount) {
-            maxCount = count;
-            targetColorId = id;
-          }
-        }
-
-        // 将所有相似颜色映射到目标颜色
-        for (const id of allSimilarColors) {
-          mergeMapping.set(id, targetColorId);
-          processedColors.add(id);
-        }
-      } else {
-        // 没有相似颜色，保持原样
-        mergeMapping.set(colorId, colorId);
-        processedColors.add(colorId);
-      }
-    }
-
-    // 应用颜色映射
-    for (let i = 0; i < width * height; i++) {
-      const idx = i * 4;
-      const originalBeadId = beadGrid[i];
-
-      if (originalBeadId === null) {
-        // 透明像素保持不变
-        newPixels[idx + 3] = 0;
-        continue;
-      }
-
-      // 获取映射后的颜色ID
-      const targetBeadId = mergeMapping.get(originalBeadId) || originalBeadId;
-
-      // 获取目标颜色的 RGB 值
-      const targetColor = palette.find(c => c.id === targetBeadId);
-      if (targetColor) {
-        const rgb = hexToRgb(targetColor.hex);
-        newPixels[idx] = rgb.r;
-        newPixels[idx + 1] = rgb.g;
-        newPixels[idx + 2] = rgb.b;
-        newPixels[idx + 3] = 255;
-      }
-
-      newBeadGrid[i] = targetBeadId;
-      newColorCounts.set(targetBeadId, (newColorCounts.get(targetBeadId) || 0) + 1);
-    }
-
-    return { pixels: newPixels, colorCounts: newColorCounts, beadGrid: newBeadGrid };
-  };
-
   // 切换颜色标签可见性
   const toggleColorVisibility = (colorId: string) => {
     setState(prev => {
@@ -491,57 +253,28 @@ export default function Editor() {
 
   // ============ 编辑模式相关函数 ============
 
-  // 保存到历史记录
-  const saveToHistory = useCallback((data: ProcessedResult) => {
-    setHistory(prev => {
-      const newHistory = prev.slice(0, historyIndex + 1);
-      // 深拷贝数据
-      const entry: HistoryEntry = {
-        pixels: new Uint8ClampedArray(data.pixels),
-        colorCounts: new Map(data.colorCounts),
-        beadGrid: [...data.beadGrid],
-      };
-      newHistory.push(entry);
-      // 限制历史记录数量
-      if (newHistory.length > 50) {
-        newHistory.shift();
-      }
-      return newHistory;
-    });
-    setHistoryIndex(prev => Math.min(prev + 1, 49));
-  }, [historyIndex]);
-
   // 初始化历史记录（在图像处理完成后调用）
   useEffect(() => {
-    if (state.processedData && history.length === 0) {
-      saveToHistory(state.processedData);
+    if (processedData && history.length === 0) {
+      resetHistory(processedData);
     }
-  }, [state.processedData, history.length, saveToHistory]);
+  }, [processedData, history.length, resetHistory]);
 
   // 撤回
   const undo = useCallback(() => {
-    if (historyIndex > 0) {
-      const prevEntry = history[historyIndex - 1];
-      if (prevEntry) {
-        // 恢复数据（深拷贝）
-        const restoredData: ProcessedResult = {
-          pixels: new Uint8ClampedArray(prevEntry.pixels),
-          colorCounts: new Map(prevEntry.colorCounts),
-          beadGrid: [...prevEntry.beadGrid],
-        };
-        setState(prev => ({ ...prev, processedData: restoredData }));
-        setHistoryIndex(historyIndex - 1);
-        toast.success("已撤回");
-      }
+    const restoredData = undoHistory();
+    if (restoredData) {
+      setProcessedData(restoredData);
+      toast.success("已撤回");
     }
-  }, [history, historyIndex]);
+  }, [setProcessedData, undoHistory]);
 
   // 键盘事件监听（Ctrl+Z 撤回）
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
         e.preventDefault();
-        if (historyIndex > 0) {
+        if (canUndo) {
           undo();
         }
       }
@@ -549,7 +282,7 @@ export default function Editor() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [historyIndex, undo]);
+  }, [canUndo, undo]);
 
   // 选择颜色
   const selectColor = useCallback((color: BeadColor) => {
@@ -563,10 +296,10 @@ export default function Editor() {
 
   // 画布编辑：修改单个豆子的颜色
   const paintBead = useCallback((gridX: number, gridY: number) => {
-    if (!state.processedData) return false;
+    if (!processedData) return false;
 
     const i = gridY * state.gridWidth + gridX;
-    const beadId = state.processedData.beadGrid[i];
+    const beadId = processedData.beadGrid[i];
 
     if (beadId === null) return false;
 
@@ -590,7 +323,7 @@ export default function Editor() {
       if (!newColor) return false;
 
       // 更新像素数据
-      const newPixels = new Uint8ClampedArray(state.processedData.pixels);
+      const newPixels = new Uint8ClampedArray(processedData.pixels);
       const idx = i * 4;
       const rgb = hexToRgb(newColor.hex);
       newPixels[idx] = rgb.r;
@@ -599,7 +332,7 @@ export default function Editor() {
       newPixels[idx + 3] = 255;
 
       // 更新颜色统计
-      const newColorCounts = new Map(state.processedData.colorCounts);
+      const newColorCounts = new Map(processedData.colorCounts);
       const oldColorId = beadId;
       newColorCounts.set(oldColorId, (newColorCounts.get(oldColorId) || 1) - 1);
       if (newColorCounts.get(oldColorId) === 0) {
@@ -608,7 +341,7 @@ export default function Editor() {
       newColorCounts.set(newColorId, (newColorCounts.get(newColorId) || 0) + 1);
 
       // 更新豆子网格
-      const newBeadGrid = [...state.processedData.beadGrid];
+      const newBeadGrid = [...processedData.beadGrid];
       newBeadGrid[i] = newColorId;
 
       const newProcessedData: ProcessedResult = {
@@ -617,15 +350,15 @@ export default function Editor() {
         beadGrid: newBeadGrid,
       };
 
-      setState(prev => ({ ...prev, processedData: newProcessedData }));
+      setProcessedData(newProcessedData);
       return true;
     }
     return false;
-  }, [state.processedData, state.gridWidth, state.isPipetteMode, state.selectedColor, paintedBeads, currentPalette, selectColor]);
+  }, [processedData, state.gridWidth, state.isPipetteMode, state.selectedColor, paintedBeads, currentPalette, selectColor, setProcessedData]);
 
   // 画布鼠标按下（编辑模式）
   const handleCanvasMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!state.isEditMode || !state.processedData) return;
+    if (!state.isEditMode || !processedData) return;
 
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -646,7 +379,7 @@ export default function Editor() {
       setIsPainting(true);
       setPaintedBeads(new Set());
       // 保存当前状态到历史记录（在开始绘制时保存一次）
-      saveToHistory(state.processedData);
+      pushHistory(processedData);
     }
 
     paintBead(gridX, gridY);
@@ -654,7 +387,7 @@ export default function Editor() {
 
   // 画布鼠标移动（编辑模式）
   const handleCanvasMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!isPainting || !state.selectedColor || !state.processedData) return;
+    if (!isPainting || !state.selectedColor || !processedData) return;
 
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -694,7 +427,7 @@ export default function Editor() {
 
   // Render Canvas Effect
   useEffect(() => {
-    if (!state.processedData || !canvasRef.current) return;
+    if (!processedData || !canvasRef.current) return;
 
     const ctx = canvasRef.current.getContext("2d");
     if (!ctx) return;
@@ -716,7 +449,7 @@ export default function Editor() {
     ctx.fillRect(0, 0, displayWidth, displayHeight);
 
     // Draw processed pixels
-    const pixels = state.processedData.pixels;
+    const pixels = processedData.pixels;
     for (let y = 0; y < state.gridHeight; y++) {
       for (let x = 0; x < state.gridWidth; x++) {
         const i = (y * state.gridWidth + x) * 4;
@@ -737,8 +470,8 @@ export default function Editor() {
         ctx.fillRect(beadX, beadY, beadSize, beadSize);
 
         // Draw Labels
-        if (state.showLabels && state.processedData.beadGrid && state.pixelSize >= 10) {
-          const beadId = state.processedData.beadGrid[i / 4];
+        if (state.showLabels && processedData.beadGrid && state.pixelSize >= 10) {
+          const beadId = processedData.beadGrid[i / 4];
           if (beadId) {
             // Check if this color label is hidden
             if (state.hiddenColorIds.has(beadId)) {
@@ -854,7 +587,7 @@ export default function Editor() {
       }
       ctx.stroke();
     }
-  }, [state.processedData, state.showGrid, state.showLabels, state.hideWhiteLabels, state.hideBlackLabels, state.hiddenColorIds, state.pixelSize, state.gridWidth, state.gridHeight, state.palette, state.domesticBrand, state.customPalette, currentPalette, canvasTransform.transform.scale]);
+  }, [processedData, state.showGrid, state.showLabels, state.hideWhiteLabels, state.hideBlackLabels, state.hiddenColorIds, state.pixelSize, state.gridWidth, state.gridHeight, state.palette, state.domesticBrand, state.customPalette, currentPalette, canvasTransform.transform.scale]);
 
   // Handle Width Change
   const handleWidthChange = (value: number[]) => {
@@ -872,43 +605,41 @@ export default function Editor() {
 
   // 获取色号统计数据
   const getColorStats = useCallback((): ColorStat[] => {
-    if (!state.processedData) return [];
-
-    const stats: ColorStat[] = [];
-    const totalBeads = state.gridWidth * state.gridHeight;
-
-    for (const [id, count] of state.processedData.colorCounts.entries()) {
-      const color = currentPalette.find(c => c.id === id);
-      if (color) {
-        stats.push({
-          colorId: id,
-          count,
-          color,
-          percentage: parseFloat((((count / totalBeads) * 100).toFixed(1))),
-        });
-      }
-    }
-
-    return stats.sort((a, b) => b.count - a.count);
-  }, [state.processedData, currentPalette, state.gridWidth, state.gridHeight]);
+    return getProcessedPatternStats(
+      processedData,
+      currentPalette,
+      state.gridWidth * state.gridHeight
+    ) as ColorStat[];
+  }, [processedData, currentPalette, state.gridWidth, state.gridHeight]);
 
   const colorStats = getColorStats();
+  const showRightDock = state.showColorStats || (state.isEditMode && state.showColorSelector);
+  const statusItems = [
+    { label: "模式", value: state.isEditMode ? "编辑" : "生成", tone: state.isEditMode ? "accent" as const : "default" as const },
+    { label: "网格", value: `${state.gridWidth} x ${state.gridHeight}` },
+    { label: "颜色数", value: processedData ? processedData.colorCounts.size : 0, tone: "muted" as const },
+    { label: "色卡", value: state.palette === "custom" ? "自定义" : (PALETTES[state.palette as PaletteKey]?.name || state.palette) },
+    { label: "缩放", value: `${Math.round(canvasTransform.transform.scale * 100)}%`, tone: "muted" as const },
+  ];
 
   return (
     <div className="h-screen flex flex-col bg-background font-body overflow-hidden">
       <Header />
 
-      <div className="flex-1 flex flex-col md:flex-row overflow-hidden min-h-0">
+      <div className="flex-1 flex overflow-hidden min-h-0">
+        <WorkbenchSidebar
+          title="生成设置"
+          collapsed={isSidebarCollapsed}
+          onToggle={() => setIsSidebarCollapsed(prev => !prev)}
+        >
+          <div className="flex-1 overflow-y-auto">
+            <div className="p-4 border-b-4 border-black/10">
+              <h2 className="font-display text-xl font-bold flex items-center gap-2">
+                <ImageIcon className="w-5 h-5" /> 图片来源
+              </h2>
+            </div>
 
-        {/* Sidebar Controls - 固定不滚动 */}
-        <aside className="w-full md:w-72 border-r-4 border-black bg-card flex flex-col z-10 shadow-xl">
-          <div className="p-4 border-b-4 border-black/10">
-            <h2 className="font-display text-xl font-bold flex items-center gap-2">
-              <ImageIcon className="w-5 h-5" /> 图片来源
-            </h2>
-          </div>
-
-          <div className="p-4">
+            <div className="p-4">
             <div
               {...getRootProps()}
               className={cn(
@@ -931,10 +662,10 @@ export default function Editor() {
             >
               使用示例图片
             </Button>
-          </div>
+            </div>
 
 
-          <div className="p-4 border-t-4 border-black/10 space-y-4">
+            <div className="p-4 border-t-4 border-black/10 space-y-4">
             <h2 className="font-display text-xl font-bold flex items-center gap-2">
               <Settings2 className="w-5 h-5" /> 基础设置
             </h2>
@@ -1112,17 +843,18 @@ export default function Editor() {
               <div className="text-xs text-muted-foreground">高度: {state.gridHeight} 格</div>
             </div>
           </div>
+          </div>
 
           <div className="mt-auto p-4 border-t-4 border-black/10">
             <PixelButton
               className="w-full"
-              disabled={!state.processedData}
+              disabled={!processedData}
               onClick={() => setState(prev => ({ ...prev, showExportDialog: true }))}
             >
               <Download className="mr-2 h-4 w-4" /> 导出图纸
             </PixelButton>
           </div>
-        </aside>
+        </WorkbenchSidebar>
 
         {/* Main Canvas Area */}
         <main className="flex-1 bg-muted/20 relative overflow-hidden flex flex-col">
@@ -1164,7 +896,7 @@ export default function Editor() {
                 <Button
                   variant={state.isEditMode ? "default" : "outline"}
                   size="sm"
-                  disabled={!state.processedData}
+                  disabled={!processedData}
                   onClick={() => setState(prev => ({ ...prev, isEditMode: !prev.isEditMode, isPipetteMode: false, selectedColor: null, showColorSelector: false }))}
                   className="h-8"
                 >
@@ -1184,9 +916,9 @@ export default function Editor() {
                       variant="outline"
                       size="sm"
                       onClick={() => {
-                        if (historyIndex > 0) undo();
+                        if (canUndo) undo();
                       }}
-                      disabled={historyIndex <= 0}
+                      disabled={!canUndo}
                       className="h-8"
                     >
                       <Undo className="w-4 h-4 mr-1" /> 撤回
@@ -1256,116 +988,145 @@ export default function Editor() {
 
             <div className="flex items-center gap-3">
               {/* 编辑模式下的色号选择器开关 */}
-              {state.isEditMode && (
-                <Button
-                  variant={state.showColorSelector ? "default" : "outline"}
-                  size="sm"
-                  onClick={() => setState(prev => ({ ...prev, showColorSelector: !prev.showColorSelector }))}
-                  className="h-8"
-                >
-                  <Palette className="w-4 h-4 mr-1" /> 色号
+                {state.isEditMode && (
+                  <Button
+                    variant={state.showColorSelector ? "default" : "outline"}
+                    size="sm"
+                    onClick={() => {
+                      if (!state.showColorSelector) setIsRightDockCollapsed(false);
+                      setState(prev => ({ ...prev, showColorSelector: !prev.showColorSelector }));
+                    }}
+                    className="h-8"
+                  >
+                    <Palette className="w-4 h-4 mr-1" /> 色号
                 </Button>
               )}
 
               {/* 色号统计按钮 */}
-              {state.processedData && state.processedData.colorCounts.size > 0 && (
+              {processedData && processedData.colorCounts.size > 0 && (
                 <Button
                   variant={state.showColorStats ? "default" : "outline"}
                   size="sm"
-                  onClick={() => setState(prev => ({ ...prev, showColorStats: !prev.showColorStats }))}
+                  onClick={() => {
+                    if (!state.showColorStats) setIsRightDockCollapsed(false);
+                    setState(prev => ({ ...prev, showColorStats: !prev.showColorStats }));
+                  }}
                   className="border-2 border-black"
                 >
                   <List className="w-4 h-4 mr-1" />
                   色号统计
                   <span className="ml-1 bg-black text-white text-xs px-1.5 rounded">
-                    {state.processedData.colorCounts.size}
+                    {processedData.colorCounts.size}
                   </span>
                 </Button>
               )}
             </div>
           </div>
 
-          {/* Canvas Display Area - 支持滚轮缩放和拖动 */}
-          <div
-            ref={canvasTransform.containerRef}
-            className="flex-1 overflow-hidden p-8 flex items-center justify-center bg-[url('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAiIGhlaWdodD0iMjAiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHBhdGggZD0iTTEgMWgydjJIMUMxeiIgZmlsbD0iIzAwMDAwMDIwIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiLz48L3N2Zz4=')] relative select-none"
-            onMouseDown={canvasTransform.handleMouseDown}
-            onMouseMove={canvasTransform.handleMouseMove}
-            onMouseUp={canvasTransform.handleMouseUp}
-            onMouseLeave={canvasTransform.handleMouseLeave}
-          >
-            {state.originalImage ? (
-              <div
-                className="bg-white p-1 border-4 border-black shadow-2xl origin-center"
-                style={{
-                  transform: `translate(${canvasTransform.transform.translateX}px, ${canvasTransform.transform.translateY}px)`,
-                  cursor: canvasTransform.isDragging ? 'grabbing' : (state.isEditMode ? (state.isPipetteMode ? 'crosshair' : 'pointer') : 'grab'),
-                  transition: canvasTransform.isDragging ? 'none' : 'transform 0.1s ease-out',
-                }}
-              >
-                <canvas
-                  ref={canvasRef}
-                  className="block"
-                  onMouseDown={handleCanvasMouseDown}
-                  onMouseMove={handleCanvasMouseMove}
-                />
-              </div>
-            ) : (
-              <div className="text-center space-y-4 opacity-50">
-                <div className="w-24 h-24 mx-auto border-4 border-black border-dashed rounded-full flex items-center justify-center">
-                  <ImageIcon className="w-10 h-10" />
+          <div className="flex-1 flex overflow-hidden min-h-0">
+            <div
+              ref={canvasTransform.containerRef}
+              className="flex-1 overflow-hidden p-8 flex items-center justify-center bg-[url('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAiIGhlaWdodD0iMjAiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHBhdGggZD0iTTEgMWgydjJIMUMxeiIgZmlsbD0iIzAwMDAwMDIwIiBmaWxsLXJ1bGU9ImV2ZW5vZGQiLz48L3N2Zz4=')] relative select-none"
+              onMouseDown={canvasTransform.handleMouseDown}
+              onMouseMove={canvasTransform.handleMouseMove}
+              onMouseUp={canvasTransform.handleMouseUp}
+              onMouseLeave={canvasTransform.handleMouseLeave}
+            >
+              {state.originalImage ? (
+                <div
+                  className="bg-white p-1 border-4 border-black shadow-2xl origin-center"
+                  style={{
+                    transform: `translate(${canvasTransform.transform.translateX}px, ${canvasTransform.transform.translateY}px)`,
+                    cursor: canvasTransform.isDragging ? 'grabbing' : (state.isEditMode ? (state.isPipetteMode ? 'crosshair' : 'pointer') : 'grab'),
+                    transition: canvasTransform.isDragging ? 'none' : 'transform 0.1s ease-out',
+                  }}
+                >
+                  <canvas
+                    ref={canvasRef}
+                    className="block"
+                    onMouseDown={handleCanvasMouseDown}
+                    onMouseMove={handleCanvasMouseMove}
+                  />
                 </div>
-                <h3 className="font-display text-2xl">请先上传图片</h3>
-                <p className="text-sm">提示：滚轮缩放 · 左键拖动</p>
-              </div>
-            )}
+              ) : (
+                <div className="text-center space-y-4 opacity-50">
+                  <div className="w-24 h-24 mx-auto border-4 border-black border-dashed rounded-full flex items-center justify-center">
+                    <ImageIcon className="w-10 h-10" />
+                  </div>
+                  <h3 className="font-display text-2xl">请先上传图片</h3>
+                  <p className="text-sm">提示：滚轮缩放 · 左键拖动</p>
+                </div>
+              )}
 
-            {/* 编辑模式提示 */}
-            {state.isEditMode && state.processedData && (
-              <div className="absolute bottom-4 left-4 right-4 bg-white border-4 border-black shadow-2xl p-4">
-                <div className="flex items-center justify-between">
-                  <div className="text-sm">
-                    {state.isPipetteMode ? (
-                      <span className="font-bold text-primary">🔍 取色模式：点击豆子吸取颜色</span>
-                    ) : state.selectedColor ? (
-                      <span className="font-bold">✏️ 点击或拖动画布批量替换为 <span className="text-primary">{state.selectedColor.id}</span></span>
-                    ) : (
-                      <span className="text-muted-foreground">请从右侧色号选择器选择颜色，或使用取色器</span>
-                    )}
-                  </div>
-                  <div className="text-xs text-muted-foreground">
-                    画布外拖动移动视图 · Ctrl+Z 撤回
-                  </div>
+              {state.showLabels && processedData && Math.floor(state.pixelSize * canvasTransform.transform.scale * 0.28) < 5 && !state.isEditMode && (
+                <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-amber-50 border-2 border-amber-400 shadow-lg px-4 py-2 rounded">
+                  <span className="text-xs text-amber-700 font-medium">⚠️ 当前显示豆子太小，色号不显示（建议放大画布）</span>
                 </div>
-              </div>
-            )}
-            {/* 豆子太小提示 - 显示在画布底部中央 */}
-            {state.showLabels && state.processedData && Math.floor(state.pixelSize * canvasTransform.transform.scale * 0.28) < 5 && !state.isEditMode && (
-              <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-amber-50 border-2 border-amber-400 shadow-lg px-4 py-2 rounded">
-                <span className="text-xs text-amber-700 font-medium">⚠️ 当前显示豆子太小，色号不显示（建议放大画布）</span>
-              </div>
+              )}
+            </div>
+
+            {showRightDock && (
+              <WorkbenchRightDock
+                collapsed={isRightDockCollapsed}
+                onToggle={() => setIsRightDockCollapsed(prev => !prev)}
+              >
+                <div className="space-y-3 p-0 pt-12">
+                  {state.showColorStats && (
+                    <WorkbenchDockSection
+                      title="色号统计"
+                      collapsed={isStatsSectionCollapsed}
+                      onToggleCollapsed={() => setIsStatsSectionCollapsed(prev => !prev)}
+                      onClose={() => setState(prev => ({ ...prev, showColorStats: false }))}
+                    >
+                      <ColorStatsPanel
+                        colorStats={colorStats}
+                        hiddenColorIds={state.hiddenColorIds}
+                        onToggleVisibility={toggleColorVisibility}
+                        isVisible={state.showColorStats}
+                        onClose={() => setState(prev => ({ ...prev, showColorStats: false }))}
+                        totalBeads={state.gridWidth * state.gridHeight}
+                        mode="docked"
+                        showHeader={false}
+                      />
+                    </WorkbenchDockSection>
+                  )}
+
+                  {state.isEditMode && state.showColorSelector && (
+                    <WorkbenchDockSection
+                      title="色号选择器"
+                      collapsed={isColorSelectorSectionCollapsed}
+                      onToggleCollapsed={() => setIsColorSelectorSectionCollapsed(prev => !prev)}
+                      onClose={() => setState(prev => ({ ...prev, showColorSelector: false }))}
+                    >
+                      <ColorSelector
+                        colors={currentPalette}
+                        selectedColor={state.selectedColor}
+                        onSelectColor={selectColor}
+                        onClearSelection={() => setState(prev => ({ ...prev, selectedColor: null }))}
+                        isVisible={state.isEditMode && state.showColorSelector}
+                        onClose={() => setState(prev => ({ ...prev, showColorSelector: false }))}
+                        title="色号选择器"
+                        mode="docked"
+                        showHeader={false}
+                      />
+                    </WorkbenchDockSection>
+                  )}
+                </div>
+              </WorkbenchRightDock>
             )}
           </div>
 
-          {/* 悬浮色号统计面板 */}
-          <ColorStatsPanel
-            colorStats={colorStats}
-            hiddenColorIds={state.hiddenColorIds}
-            onToggleVisibility={toggleColorVisibility}
-            isVisible={state.showColorStats}
-            onClose={() => setState(prev => ({ ...prev, showColorStats: false }))}
-            totalBeads={state.gridWidth * state.gridHeight}
-          />
-
-          {/* 色号选择器面板（编辑模式） */}
-          <ColorSelector
-            colors={currentPalette}
-            selectedColor={state.selectedColor}
-            onSelectColor={selectColor}
-            onClearSelection={() => setState(prev => ({ ...prev, selectedColor: null }))}
-            isVisible={state.isEditMode && state.showColorSelector}
-            onClose={() => setState(prev => ({ ...prev, showColorSelector: false }))}
-            title="色号选择器"
+          <WorkbenchStatusBar
+            items={statusItems}
+            hint={
+              state.isEditMode
+                ? (state.isPipetteMode
+                  ? "取色模式 · 点击格子吸取色号"
+                  : state.selectedColor
+                    ? `批量绘制 ${state.selectedColor.id} · Ctrl+Z 撤回`
+                    : "编辑模式 · 从右侧选择颜色后绘制")
+                : "滚轮缩放 · 左键拖动画布"
+            }
           />
         </main>
       </div>
@@ -1373,7 +1134,7 @@ export default function Editor() {
       <ExportDialog
         open={state.showExportDialog}
         onOpenChange={(open) => setState(prev => ({ ...prev, showExportDialog: open }))}
-        processedData={state.processedData}
+        processedData={processedData}
         palette={currentPalette}
         width={state.gridWidth}
         height={state.gridHeight}

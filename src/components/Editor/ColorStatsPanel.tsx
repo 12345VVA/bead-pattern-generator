@@ -23,6 +23,8 @@ export interface ColorStatsPanelProps {
   isEditMode?: boolean;
   selectedColor?: BeadColor | null;
   onSelectColor?: (color: BeadColor) => void;
+  mode?: "floating" | "docked";
+  showHeader?: boolean;
 }
 
 export function ColorStatsPanel({
@@ -35,29 +37,43 @@ export function ColorStatsPanel({
   isEditMode = false,
   selectedColor,
   onSelectColor,
+  mode = "floating",
+  showHeader = true,
 }: ColorStatsPanelProps) {
   if (!isVisible || colorStats.length === 0) return null;
 
   return (
-    <div className="absolute top-16 right-4 w-72 bg-white border-4 border-black shadow-2xl transition-transform duration-300 z-20">
-      {/* 面板头部 */}
-      <div className="flex items-center justify-between p-3 border-b-2 border-black bg-muted">
-        <div className="flex items-center gap-2">
-          <Palette className="w-4 h-4" />
-          <span className="font-bold text-sm">色号统计</span>
+    <div className={cn(
+      "bg-white transition-transform duration-300",
+      mode === "floating" && "absolute top-16 right-4 w-72 shadow-2xl z-20",
+      mode === "floating" && "border-4 border-black",
+      mode === "docked" && "h-full w-full shadow-none border-0"
+    )}>
+      {showHeader && (
+        <div className={cn(
+          "flex items-center justify-between p-3 bg-muted",
+          mode === "floating" ? "border-b-2 border-black" : "border-b border-black/10"
+        )}>
+          <div className="flex items-center gap-2">
+            <Palette className="w-4 h-4" />
+            <span className="font-bold text-sm">色号统计</span>
+          </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={onClose}
+            className="h-7 w-7 p-0"
+          >
+            <X className="w-4 h-4" />
+          </Button>
         </div>
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={onClose}
-          className="h-7 w-7 p-0"
-        >
-          <X className="w-4 h-4" />
-        </Button>
-      </div>
+      )}
 
       {/* 色号列表 */}
-      <ScrollArea className="h-64 max-h-[calc(100vh-200px)]">
+      <ScrollArea className={cn(
+        "max-h-[calc(100vh-200px)]",
+        mode === "floating" ? "h-64" : "h-[22rem]"
+      )}>
         <div className="p-2 space-y-1">
           {colorStats.map((stat) => {
             const isHidden = hiddenColorIds.has(stat.colorId);
@@ -122,7 +138,10 @@ export function ColorStatsPanel({
 
       {/* 总计信息 */}
       {totalBeads !== undefined && (
-        <div className="p-3 border-t-2 border-black bg-muted/50">
+        <div className={cn(
+          "p-3 bg-muted/50",
+          mode === "floating" ? "border-t-2 border-black" : "border-t border-black/10"
+        )}>
           <div className="flex items-center justify-between text-sm">
             <span className="font-bold">总色号数</span>
             <span className="font-mono">{colorStats.length}</span>
